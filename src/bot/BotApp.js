@@ -143,7 +143,7 @@ import { ToolRouter } from '../services/ToolRouter.js';
 import { TelegramUI } from './TelegramUI.js';
 import { AccessControlService } from '../services/AccessControlService.js';
 import { ApiClient } from '../services/ApiClient.js';
-import { startDirectorHourlyReportScheduler } from '../services/ReportScheduler.js';
+import { startDirectorHourlyReportScheduler,startAssigneeReminderScheduler5min } from '../services/ReportScheduler.js';
 
 // Нормализация статуса к БД
 function normalizeTaskStatus(s) {
@@ -178,6 +178,7 @@ export class BotApp {
 	    // 🕒 Ежечасный отчёт директору (Asia/Dushanbe)
     process.env.TZ = process.env.TZ || 'Asia/Dushanbe';
     startDirectorHourlyReportScheduler({ api: this.api, toolRouter: this.tools, notifier: this.notifier });
+    startAssigneeReminderScheduler5min({ api: this.api, toolRouter: this.tools, notifier: this.notifier });
   }
 
   bindHandlers() {

@@ -319,16 +319,70 @@ export class ToolRouter {
       return { ok: true, employees: emps };
     }
 
-    // ---- LIST TASKS ----
-    if (name === 'list_tasks') {
-      const [rows, emps] = await Promise.all([
-        this.api.get('tasks', {}),
-        this.employees.list()
-      ]);
-      const byId = new Map(emps.map(e => [e.employee_id || e.id, e]));
-      const tasks = (Array.isArray(rows) ? rows : []).map(r => mapTaskRow(r, byId));
-      return { ok: true, tasks };
-    }
+    // // ---- LIST TASKS ----
+    // if (name === 'list_tasks') {
+    //   const [rows, emps] = await Promise.all([
+    //     this.api.get('tasks', {}),
+    //     this.employees.list()
+    //   ]);
+    //   const byId = new Map(emps.map(e => [e.employee_id || e.id, e]));
+    //   const tasks = (Array.isArray(rows) ? rows : []).map(r => mapTaskRow(r, byId));
+    //   return { ok: true, tasks };
+    // }
+
+//     // ---- LIST TASKS ----
+// if (name === 'list_tasks') {
+//   const [emps] = await Promise.all([ this.employees.list() ]);
+
+//   // кто запросил
+//   const requester = ctx?.requesterEmployee || null;
+//   const requesterRole = (requester && String(requester.user_role || '').toLowerCase()) || 'staff';
+//   const mineOnly = requesterRole === 'staff'; // staff видит только свои
+
+//   let rows;
+//   if (mineOnly && (requester?.employee_id || requester?.id)) {
+//     // запрашиваем только свои задачи
+//     rows = await this.api.get('tasks', { employee_id: requester.employee_id || requester.id });
+//   } else {
+//     rows = await this.api.get('tasks', {});
+//   }
+
+//   // справочник сотрудников
+//   const byId = new Map(emps.map(e => [e.employee_id || e.id, e]));
+//   const tasks = (Array.isArray(rows) ? rows : []).map(r => mapTaskRow(r, byId));
+
+//   return { ok: true, tasks };
+// }
+
+
+// ---- LIST TASKS ----
+if (name === 'list_tasks') {
+  const [emps] = await Promise.all([ this.employees.list() ]);
+
+  // кто запросил
+  const requester = ctx?.requesterEmployee || null;
+  const requesterRole = (requester && String(requester.user_role || '').toLowerCase()) || 'staff';
+  const mineOnly = requesterRole === 'staff'; // staff видит только свои
+
+  let rows;
+  if (mineOnly && (requester?.employee_id || requester?.id)) {
+    // запрашиваем только свои задачи
+    rows = await this.api.get('tasks', { employee_id: requester.employee_id || requester.id });
+  } else {
+    rows = await this.api.get('tasks', {});
+  }
+
+  // справочник сотрудников
+  const byId = new Map(emps.map(e => [e.employee_id || e.id, e]));
+  const tasks = (Array.isArray(rows) ? rows : []).map(r => mapTaskRow(r, byId));
+console.log("666");
+  // удобные строки для мгновенного вывода с ID
+  const tasks_pretty = tasks.map(t =>
+    `#${t.id} — ${t.task} | Исп..: ${t.assignee} | Дедлайн: ${t.deadline ?? '—'} | Статус: ${t.status ?? '—'} | Приоритет: ${t.priority ?? '—'}`
+  );
+
+  return { ok: true, tasks, tasks_pretty };
+}
 
     // ---- REPORT ----
     if (name === 'report') {

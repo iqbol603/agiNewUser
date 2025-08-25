@@ -584,7 +584,8 @@ console.log("dd", tzDate.toISOString());
 5) Действия с задачами и рассылками только через tools; ACL: staff не может вызывать create_task, send_telegram, reassign_task.
 6) Отвечайте кратко.
 7) Если пользователь спросить о себе, поиши и преддоставь информацию по его чат ID ${userMeta.tg_chat_id}.
-8) Также приветствуй пользователя по имени.`;
+8) Покажи id задачи рядом с задачи.
+9) Также приветствуй пользователя по имени.`;
 
       let run = await this.client.beta.threads.runs.create(threadId, {
         assistant_id: assistantId,
