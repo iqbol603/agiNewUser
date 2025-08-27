@@ -15,7 +15,22 @@ export const pool = mysql.createPool({
 });
 
 export async function query(sql, params) {
-    const [rows] = await pool.execute(sql, params);
+    // Если параметры не переданы, используем пустой массив
+    const safeParams = params || [];
+    
+    // Убеждаемся, что все параметры - строки или числа
+    const sanitizedParams = safeParams.map(param => {
+        if (param === null || param === undefined) return null;
+        if (typeof param === 'number') return param;
+        if (typeof param === 'string') return param;
+        return String(param);
+    });
+    
+    console.log("sql", sql);
+    console.log("params", sanitizedParams);
+    
+    const [rows] = await pool.execute(sql, sanitizedParams);
+    console.log("sql result", rows);
     return rows;
 }
 

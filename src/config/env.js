@@ -12,6 +12,7 @@ export const ENV = {
     DB_PORT: Number(process.env.DB_PORT) || 3306,
     DB_USER: process.env.DB_USER,
     DB_NAME: process.env.DB_NAME,
+    DB_PASSWORD: process.env.DB_PASSWORD,
     DB_CONNECTION_LIMIT: Number(process.env.DB_CONNECTION_LIMIT) || 10,
     DB_CHARSET: process.env.DB_CHARSET || 'utf8mb4'
 };

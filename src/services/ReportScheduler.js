@@ -1009,7 +1009,7 @@ export function startDirectorHourlyReportScheduler({ api, toolRouter, notifier }
  * Напоминания сотрудникам — КАЖДЫЕ 5 МИНУТ
  */
 export function startAssigneeReminderScheduler5min({ api, toolRouter, notifier }) {
-  const task = cron.schedule('*/5 * * * *', async () => {
+  const task = cron.schedule('0 * * * *', async () => {
     try {
       await deliverAssigneeReminders({ toolRouter, api, notifier });
       console.log('[ReportScheduler] assignee reminders sent at', new Date().toISOString());
