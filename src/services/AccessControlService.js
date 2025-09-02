@@ -23,16 +23,24 @@ export class AccessControlService {
 		return;
 		}
 
-		const list = await this.employees.list?.({ noCache: true }) ?? [];
-		const byTg = new Map();
+		try {
+			const list = await this.employees.list?.({ noCache: true }) ?? [];
+			const byTg = new Map();
 
-		for (const e of list) {
-			const id = asNumber(e?.tg_user_id ?? e?.chat_id);
-			if (Number.isFinite(id)) byTg.set(id, e);
+			for (const e of list) {
+				const id = asNumber(e?.tg_user_id ?? e?.chat_id);
+				if (Number.isFinite(id)) byTg.set(id, e);
+			}
+
+			this._cache = { at: now, byTg, raw: list };
+			log.info('[ACL] employees fetched via API, count:', byTg.size);
+		} catch (error) {
+			log.warn('[ACL] Ошибка получения сотрудников из API:', error.message);
+			// Используем кэш если он есть, иначе пустой список
+			if (this._cache.raw.length === 0) {
+				this._cache = { at: now, byTg: new Map(), raw: [] };
+			}
 		}
-
-		this._cache = { at: now, byTg, raw: list };
-		log.info('[ACL] employees fetched via API, count:', byTg.size);
 	}
 
 	async authorize(tgUserId) {

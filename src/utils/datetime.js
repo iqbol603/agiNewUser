@@ -27,6 +27,12 @@ export function parseHumanDateRu(input, now = new Date()) {
 	if (/\bпослезавтра\b/.test(s)) dayShift = 2;
 	else if (/\bзавтра\b/.test(s)) dayShift = 1;
 	else if (/\bсегодня\b/.test(s)) dayShift = 0;
+	
+	// Добавляем поддержку "через X дней"
+	const throughMatch = s.match(/\bчерез\s+(\d+)\s+дн(?:я|ей)?\b/);
+	if (throughMatch) {
+		dayShift = parseInt(throughMatch[1]);
+	}
 
 	// dd.mm(.yyyy)
 	const mDate = s.match(/\b(\d{1,2})\.(\d{1,2})(?:\.(\d{2,4}))?\b/);
