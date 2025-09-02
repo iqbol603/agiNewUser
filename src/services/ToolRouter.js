@@ -4,6 +4,8 @@ import { Notifier } from './Notifier.js';
 import { parseHumanDateRu, toDbDateTime } from '../utils/datetime.js';
 import { query } from '../config/db.js';
 import { log } from '../utils/logger.js';
+import { TaskComplexityAnalyzer } from './TaskComplexityAnalyzer.js';
+import { TaskScheduler } from './TaskScheduler.js';
 
 const norm = (s) => String(s || '').trim().toLowerCase();
 
@@ -17,7 +19,7 @@ const mapTaskRow = (t, employeesById = new Map()) => {
 		deadline: t.deadline || null,
 		status: t.status || null,
 		priority: t.prioritet || t.priority || null,
-		tg_user_id: emp?.tg_user_id || null
+		chat_id: emp?.chat_id || null
 	};
 };
 
@@ -196,6 +198,51 @@ export const TOOL_SCHEMAS = [
   {
     type: 'function',
     function: {
+      name: 'submit_explanation',
+      description: 'Предоставить объяснительную по просроченной задаче',
+      parameters: {
+        type: 'object',
+        properties: {
+          explanationId: { type: 'number', description: 'ID запроса объяснительной' },
+          explanationText: { type: 'string', description: 'Текст объяснения причин просрочки' }
+        },
+        required: ['explanationId', 'explanationText']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'review_explanation',
+      description: 'Рассмотреть объяснительную и принять решение (только для директоров)',
+      parameters: {
+        type: 'object',
+        properties: {
+          explanationId: { type: 'number', description: 'ID объяснительной' },
+          decision: { type: 'string', enum: ['accept', 'reject', 'penalty'], description: 'Решение: принять, отклонить, или наказать' },
+          managerDecision: { type: 'string', description: 'Комментарий директора' },
+          bonusPenaltyAmount: { type: 'number', description: 'Сумма штрафа/лишения бонуса (если decision=penalty)' }
+        },
+        required: ['explanationId', 'decision', 'managerDecision']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'list_pending_explanations',
+      description: 'Получить список ожидающих рассмотрения объяснительных (только для директоров)',
+      parameters: {
+        type: 'object',
+        properties: {
+          limit: { type: 'number', description: 'Максимальное количество записей (по умолчанию 10)' }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
       name: 'force_close_task',
       description: 'Принудительно закрыть задачу (обходит все проверки)',
       parameters: {
@@ -215,6 +262,8 @@ export class ToolRouter {
     this.api = api || new ApiClient();
     this.employees = employees || new EmployeesService(this.api);
     this.notifier = notifier; // <— важно
+    this.complexityAnalyzer = new TaskComplexityAnalyzer();
+    this.taskScheduler = new TaskScheduler(this.api);
   }
 
   async route(name, args, ctx = {}) {
@@ -237,6 +286,62 @@ export class ToolRouter {
         log.info(`[ToolRouter] employee_id для API:`, employee_id);
 
         let deadline = String(A.deadline || '').trim();
+        
+        // Если дедлайн не указан, анализируем сложность задачи и загруженность сотрудника
+        if (!deadline) {
+          try {
+            const analysis = this.complexityAnalyzer.analyzeTaskComplexity(A.title, A.desc);
+            
+            // Анализируем загруженность сотрудника
+            const workloadAnalysis = await this.taskScheduler.analyzeEmployeeWorkload(
+              employee_id, 
+              analysis.complexity, 
+              analysis.estimatedDays
+            );
+            
+            // Определяем финальный дедлайн с учетом загруженности
+            let finalDeadline;
+            if (workloadAnalysis.hasActiveTasks && workloadAnalysis.recommendedDeadline) {
+              // Используем рекомендацию планировщика
+              finalDeadline = this.taskScheduler.formatDeadline(workloadAnalysis.recommendedDeadline.date);
+              log.info(`[ToolRouter] Планирование с учетом загруженности сотрудника:`);
+              log.info(`[ToolRouter] - Активных задач: ${workloadAnalysis.activeTasksCount}`);
+              log.info(`[ToolRouter] - Уровень загруженности: ${workloadAnalysis.workload}`);
+              log.info(`[ToolRouter] - Стратегия: ${workloadAnalysis.recommendedDeadline.strategy}`);
+              log.info(`[ToolRouter] - Обоснование: ${workloadAnalysis.reasoning}`);
+            } else {
+              // Используем стандартную оценку сложности
+              const deadlineInfo = this.complexityAnalyzer.generateDeadline(analysis);
+              finalDeadline = deadlineInfo.formatted;
+              log.info(`[ToolRouter] Стандартное планирование (нет активных задач):`);
+            }
+            
+            deadline = finalDeadline;
+            
+            // Обновляем приоритет на основе анализа, если он не был указан явно
+            if (!A.priority || A.priority === 'Средний') {
+              const priorityMap = {
+                'critical': 'Критический',
+                'high': 'Высокий', 
+                'medium': 'Средний',
+                'low': 'Низкий'
+              };
+              A.priority = priorityMap[analysis.priority] || 'Средний';
+            }
+            
+            log.info(`[ToolRouter] Автоматический анализ сложности задачи:`);
+            log.info(`[ToolRouter] - Сложность: ${analysis.complexity}`);
+            log.info(`[ToolRouter] - Приоритет: ${analysis.priority}`);
+            log.info(`[ToolRouter] - Оценка времени: ${analysis.estimatedDays} дней`);
+            log.info(`[ToolRouter] - Финальный дедлайн: ${deadline}`);
+            log.info(`[ToolRouter] - Уверенность: ${Math.round(analysis.confidence * 100)}%`);
+            
+          } catch (analysisError) {
+            log.error(`[ToolRouter] Ошибка анализа сложности/планирования:`, analysisError.message);
+            // Fallback на "завтра" если анализ не удался
+            deadline = 'завтра 17:00';
+          }
+        }
         
         // Парсим относительные даты в абсолютные для API
         if (deadline) {
@@ -432,7 +537,7 @@ export class ToolRouter {
         let employeeToShow = requester;
         if (!employeeToShow && requesterChatId) {
           const chatIdStr = String(requesterChatId);
-          employeeToShow = emps.find(emp => String(emp.tg_user_id) === chatIdStr);
+          employeeToShow = emps.find(emp => String(emp.chat_id) === chatIdStr);
           if (employeeToShow) {
             log.info(`[ToolRouter] Найден сотрудник по chat_id ${chatIdStr}: ${employeeToShow.name}`);
           } else {
@@ -524,8 +629,8 @@ export class ToolRouter {
 
       if (/^(all|всем)$/i.test(toRaw)) {
         const emps = await this.employees.list();
-        const list = emps.filter(e => !!(e.tg_user_id || e.chat_id));
-        for (const e of list) await sendOne(e.tg_user_id || e.chat_id);
+        const list = emps.filter(e => !!(e.chat_id));
+        for (const e of list) await sendOne(e.chat_id);
         return { ok: true, sent: results, count: results.length };
       }
 
@@ -541,9 +646,9 @@ export class ToolRouter {
       }
       const emp = match || candidates?.[0];
       if (!emp) return { ok: false, error: 'EMPLOYEE_NOT_FOUND' };
-      if (!(emp.tg_user_id || emp.chat_id)) return { ok: false, error: 'NO_CHAT_ID_FOR_EMPLOYEE' };
+      if (!emp.chat_id) return { ok: false, error: 'NO_CHAT_ID_FOR_EMPLOYEE' };
 
-      await sendOne(emp.tg_user_id || emp.chat_id);
+      await sendOne(emp.chat_id);
       return { ok: true, sent: results };
     }
 
@@ -725,6 +830,82 @@ export class ToolRouter {
         }
       } catch (error) {
         log.error('[ToolRouter] Ошибка сохранения артефакта:', error.message);
+        return { ok: false, error: error.message };
+      }
+    }
+
+    // ---- SUBMIT EXPLANATION ----
+    if (name === 'submit_explanation') {
+      try {
+        const { ExplanatoryService } = await import('./ExplanatoryService.js');
+        const explanatoryService = new ExplanatoryService();
+        
+        const result = await explanatoryService.submitExplanation(
+          Number(A.explanationId),
+          String(A.explanationText),
+          ctx?.requesterEmployee?.id || ctx?.requesterEmployee?.employee_id
+        );
+        
+        if (result) {
+          log.info(`[ToolRouter] Объяснительная ${A.explanationId} получена`);
+          return { ok: true, message: 'Объяснительная успешно отправлена на рассмотрение' };
+        } else {
+          return { ok: false, error: 'Не удалось отправить объяснительную' };
+        }
+      } catch (error) {
+        log.error('[ToolRouter] Ошибка отправки объяснительной:', error.message);
+        return { ok: false, error: error.message };
+      }
+    }
+
+    // ---- REVIEW EXPLANATION ----
+    if (name === 'review_explanation') {
+      try {
+        // Проверяем права доступа (только директора)
+        if (!ctx?.requesterEmployee || ctx.requesterEmployee.user_role !== 'manager') {
+          return { ok: false, error: 'Недостаточно прав для рассмотрения объяснительных' };
+        }
+
+        const { ExplanatoryService } = await import('./ExplanatoryService.js');
+        const explanatoryService = new ExplanatoryService();
+        
+        const result = await explanatoryService.reviewExplanation(
+          Number(A.explanationId),
+          String(A.decision),
+          String(A.managerDecision),
+          Number(A.bonusPenaltyAmount || 0)
+        );
+        
+        if (result) {
+          log.info(`[ToolRouter] Решение по объяснительной ${A.explanationId}: ${A.decision}`);
+          return { ok: true, message: 'Решение по объяснительной принято' };
+        } else {
+          return { ok: false, error: 'Не удалось принять решение' };
+        }
+      } catch (error) {
+        log.error('[ToolRouter] Ошибка рассмотрения объяснительной:', error.message);
+        return { ok: false, error: error.message };
+      }
+    }
+
+    // ---- LIST PENDING EXPLANATIONS ----
+    if (name === 'list_pending_explanations') {
+      try {
+        // Проверяем права доступа (только директора)
+        if (!ctx?.requesterEmployee || ctx.requesterEmployee.user_role !== 'manager') {
+          return { ok: false, error: 'Недостаточно прав для просмотра объяснительных' };
+        }
+
+        const { ExplanatoryService } = await import('./ExplanatoryService.js');
+        const explanatoryService = new ExplanatoryService();
+        
+        const explanations = await explanatoryService.getExplanationsForReview();
+        const limit = Number(A.limit || 10);
+        
+        log.info(`[ToolRouter] Получено ${explanations.length} объяснительных для рассмотрения`);
+        return { ok: true, explanations: explanations.slice(0, limit) };
+      } catch (error) {
+        log.error('[ToolRouter] Ошибка получения объяснительных:', error.message);
         return { ok: false, error: error.message };
       }
     }

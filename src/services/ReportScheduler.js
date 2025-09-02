@@ -162,7 +162,7 @@
 // //     const job = String(e.job || '').toLowerCase();
 // //     const name = String(e.name || '').toLowerCase();
 // //     if (/директор/.test(job) || name.includes('муминов') || name.includes('бахтиёр')) {
-// //       const cid = String(e.tg_user_id || e.chat_id || '').trim(); // учитываем оба поля
+// //       const cid = String(e.chat_id || '').trim(); // учитываем оба поля
 // //       if (cid) ids.add(cid);
 // //     }
 // //   }
@@ -183,7 +183,7 @@
 //     const job = String(e.job || '').toLowerCase();
 //     const name = String(e.name || '').toLowerCase();
 //     if (/директор/.test(job) || name.includes('муминов') || name.includes('бахтиёр')) {
-//       const cid = String(e.tg_user_id || e.chat_id || '').trim();
+//       const cid = String(e.chat_id || '').trim();
 //       if (cid) ids.add(cid);
 //     }
 //   }
@@ -491,7 +491,7 @@
 //     const job = String(e.job || '').toLowerCase();
 //     const name = String(e.name || '').toLowerCase();
 //     if (/директор/.test(job) || name.includes('муминов') || name.includes('бахтиёр')) {
-//       const cid = String(e.tg_user_id || e.chat_id || '').trim();
+//       const cid = String(e.chat_id || '').trim();
 //       if (cid) ids.add(cid);
 //     }
 //   }
@@ -558,6 +558,7 @@
 // src/services/ReportScheduler.js
 import cron from 'node-cron';
 import { ENV } from '../config/env.js';
+import { ExplanatoryService } from './ExplanatoryService.js';
 
 /**
  * Настройка:
@@ -693,15 +694,34 @@ async function fetchEmployees(toolRouter, api) {
 
 async function fetchTasks(toolRouter, api) {
   try {
+    // Для отчетов используем API напрямую, а не ToolRouter
+    if (api?.get) {
+      const tasks = await api.get('tasks');
+      if (Array.isArray(tasks)) {
+        console.log(`[ReportScheduler] Получено ${tasks.length} задач из API`);
+        return tasks;
+      }
+    }
+  } catch (e) {
+    console.error('[ReportScheduler] Получение задач из API failed:', e?.message || e);
+  }
+  
+  // Fallback через ToolRouter
+  try {
     if (toolRouter?.route) {
-      const r = await toolRouter.route('list_tasks', {});
+      // Для директора передаем специальный контекст, чтобы он видел все задачи
+      const directorContext = {
+        requesterChatId: process.env.DIRECTOR_CHAT_ID,
+        requesterEmployee: { user_role: 'manager' } // Принудительно устанавливаем роль manager
+      };
+      const r = await toolRouter.route('list_tasks', {}, directorContext);
       const tasks = Array.isArray(r) ? r : (r?.tasks || r?.items || []);
       if (Array.isArray(tasks)) return tasks;
     }
   } catch (e) {
     console.error('[ReportScheduler] list_tasks via toolRouter failed:', e?.message || e);
   }
-  if (api?.listTasks) return await api.listTasks({});
+  
   return [];
 }
 
@@ -737,9 +757,127 @@ function enrichTasksWithEmployees(tasks, employees) {
   });
 }
 
+/* ---------- Диаграммы и объяснительные ---------- */
+
+/**
+ * Создает текстовую диаграмму для статистики задач
+ */
+function createTaskStatusDiagram(tasks) {
+  const statusCounts = {};
+  for (const task of tasks) {
+    const status = task.status || 'Неизвестно';
+    statusCounts[status] = (statusCounts[status] || 0) + 1;
+  }
+
+  const total = tasks.length;
+  if (total === 0) return '📊 Диаграмма статусов:\n(нет данных)';
+
+  const maxBarLength = 20;
+  let diagram = '📊 Диаграмма статусов:\n';
+  
+  for (const [status, count] of Object.entries(statusCounts)) {
+    const percentage = Math.round((count / total) * 100);
+    const barLength = Math.round((count / total) * maxBarLength);
+    const bar = '█'.repeat(barLength) + '░'.repeat(maxBarLength - barLength);
+    diagram += `${status}: ${bar} ${count} (${percentage}%)\n`;
+  }
+
+  return diagram;
+}
+
+/**
+ * Создает диаграмму просрочек по сотрудникам
+ */
+function createOverdueDiagram(overdueTasks, employeesById) {
+  if (overdueTasks.length === 0) return '';
+
+  const employeeOverdue = {};
+  for (const task of overdueTasks) {
+    const empId = String(task.employee_id || 'unknown');
+    const emp = employeesById.get(empId) || { name: `ID:${empId}` };
+    const name = emp.name || `ID:${empId}`;
+    employeeOverdue[name] = (employeeOverdue[name] || 0) + 1;
+  }
+
+  const maxBarLength = 15;
+  const maxOverdue = Math.max(...Object.values(employeeOverdue));
+  
+  let diagram = '\n⚠️ Просрочки по сотрудникам:\n';
+  for (const [name, count] of Object.entries(employeeOverdue)) {
+    const barLength = Math.round((count / maxOverdue) * maxBarLength);
+    const bar = '🔴'.repeat(barLength) + '⚪'.repeat(maxBarLength - barLength);
+    diagram += `${name}: ${bar} ${count}\n`;
+  }
+
+  return diagram;
+}
+
+/**
+ * Запрашивает объяснительные у сотрудников с просроченными задачами
+ */
+async function requestExplanationsForOverdueTasks(overdueTasks, employeesById, explanatoryService) {
+  const requests = [];
+  
+  for (const task of overdueTasks) {
+    const empId = String(task.employee_id || 'unknown');
+    if (empId === 'unknown') continue;
+    
+    const emp = employeesById.get(empId);
+    if (!emp || !emp.chat_id) continue;
+
+    try {
+      const explanationId = await explanatoryService.requestExplanation(
+        task.task_id,
+        empId,
+        task.task,
+        task.deadline
+      );
+      requests.push({ task, employee: emp, explanationId });
+    } catch (error) {
+      console.error(`[ReportScheduler] Ошибка запроса объяснительной для задачи ${task.task_id}:`, error.message);
+    }
+  }
+
+  return requests;
+}
+
+/**
+ * Отправляет уведомления сотрудникам о необходимости объяснительных
+ */
+async function notifyEmployeesAboutExplanations(requests, toolRouter, notifier) {
+  for (const { task, employee, explanationId } of requests) {
+    const message = `⚠️ ТРЕБУЕТСЯ ОБЪЯСНИТЕЛЬНАЯ
+
+Задача: ${task.task}
+Дедлайн: ${fmtDate(task.deadline)}
+Статус: Просрочена
+
+Пожалуйста, предоставьте объяснение причин просрочки.
+Используйте команду: /explanation ${explanationId} [ваш текст объяснения]
+
+Пример: /explanation ${explanationId} Задержка произошла из-за технических проблем с сервером.`;
+
+    try {
+      if (toolRouter?.route) {
+        await toolRouter.route('send_telegram', { 
+          to: employee.chat_id, 
+          text: message 
+        }, {
+          requesterChatId: 'system',
+          requesterEmployee: { user_role: 'manager', name: 'System Scheduler' }
+        });
+      } else if (notifier?.sendMessage) {
+        await notifier.sendMessage(employee.chat_id, message);
+      }
+    } catch (error) {
+      console.error(`[ReportScheduler] Ошибка отправки уведомления сотруднику ${employee.name}:`, error.message);
+    }
+  }
+}
+
 /* ---------- Директорский отчёт ---------- */
 
-async function buildReport({ toolRouter, api }) {
+async function buildReport({ toolRouter, api, explanatoryService }) {
   const [employees, tasks] = await Promise.all([
     fetchEmployees(toolRouter, api),
     fetchTasks(toolRouter, api)
@@ -759,6 +897,21 @@ async function buildReport({ toolRouter, api }) {
   const { overdue, due24h } = calcDeadlineBuckets(tasksFixed);
   const perEmp = perEmployeeLines(tasksFixed, employeesById);
 
+  // Создаем диаграммы
+  const statusDiagram = createTaskStatusDiagram(tasksFixed);
+  const overdueDiagram = createOverdueDiagram(overdue, employeesById);
+
+  // Запрашиваем объяснительные для просроченных задач
+  let explanationRequests = [];
+  if (overdue.length > 0 && explanatoryService) {
+    try {
+      explanationRequests = await requestExplanationsForOverdueTasks(overdue, employeesById, explanatoryService);
+      console.log(`[ReportScheduler] Создано ${explanationRequests.length} запросов объяснительных`);
+    } catch (error) {
+      console.error('[ReportScheduler] Ошибка создания запросов объяснительных:', error.message);
+    }
+  }
+
   let text =
 `${header}
 
@@ -768,12 +921,23 @@ async function buildReport({ toolRouter, api }) {
 • Просрочено: ${overdue.length}
 • ≤24ч: ${due24h.length}
 
+${statusDiagram}
+${overdueDiagram}
+
 ПО СОТРУДНИКАМ:
 ${perEmp.join('\n')}
 `;
 
   if (overdue.length) text += topList('⚠️ Общие просроченные', overdue, 8, employeesById);
   if (due24h.length)  text += topList('⏱ Общие ≤24ч', due24h, 8, employeesById);
+
+  // Добавляем информацию об объяснительных
+  if (explanationRequests.length > 0) {
+    text += `\n📝 ОБЪЯСНИТЕЛЬНЫЕ:\n`;
+    text += `• Запрошено объяснительных: ${explanationRequests.length}\n`;
+    text += `• Уведомления отправлены сотрудникам\n`;
+    text += `• Ожидается рассмотрение директором\n`;
+  }
 
   return cutTelegram(text);
 }
@@ -791,7 +955,7 @@ function findDirectorChatIds(employees, envChatIds) {
     const job = String(e.job || '').toLowerCase();
     const name = String(e.name || '').toLowerCase();
     if (/директор/.test(job) || name.includes('муминов') || name.includes('бахтиёр')) {
-      const cid = String(e.tg_user_id || e.chat_id || '').trim();
+      const cid = String(e.chat_id || '').trim();
       if (cid) ids.add(cid);
     }
   }
@@ -990,10 +1154,10 @@ async function deliverAssigneeReminders({ toolRouter, api, notifier }) {
 /**
  * Почасовой отчёт для директора(ов) + лог
  */
-export function startDirectorHourlyReportScheduler({ api, toolRouter, notifier }) {
+export function startDirectorHourlyReportScheduler({ api, toolRouter, notifier, explanatoryService }) {
   const task = cron.schedule('0 * * * *', async () => {
     try {
-      const text = await buildReport({ toolRouter, api });
+      const text = await buildReport({ toolRouter, api, explanatoryService });
       await deliverReport({ toolRouter, api, notifier, text });
       console.log('[ReportScheduler] director report sent at', new Date().toISOString());
     } catch (e) {

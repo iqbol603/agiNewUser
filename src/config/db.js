@@ -10,7 +10,7 @@ export const pool = mysql.createPool({
     password: ENV.DB_PASSWORD,
     database: ENV.DB_NAME,
     connectionLimit: ENV.DB_CONNECTION_LIMIT,
-    charset: ENV.DB_CHARSET,
+    charset: 'utf8mb4',
     timezone: '+00:00'
     // Убираем неподдерживаемые опции
 });
@@ -125,6 +125,26 @@ export async function initializeTables() {
                 INDEX idx_task_id (task_id),
                 INDEX idx_check_type (check_type),
                 INDEX idx_status (status)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+        `);
+        
+        // Таблица для объяснительных сотрудников
+        await query(`
+            CREATE TABLE IF NOT EXISTS employee_explanations (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                task_id INT NOT NULL,
+                employee_id INT NOT NULL,
+                explanation_text TEXT NOT NULL,
+                status ENUM('pending', 'accepted', 'rejected', 'bonus_penalty') NOT NULL DEFAULT 'pending',
+                manager_decision TEXT,
+                bonus_penalty_amount DECIMAL(10,2) DEFAULT 0.00,
+                requested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                responded_at TIMESTAMP NULL,
+                manager_reviewed_at TIMESTAMP NULL,
+                INDEX idx_task_id (task_id),
+                INDEX idx_employee_id (employee_id),
+                INDEX idx_status (status),
+                INDEX idx_requested_at (requested_at)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
         `);
         

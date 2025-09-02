@@ -143,6 +143,7 @@ import { ToolRouter } from '../services/ToolRouter.js';
 import { TelegramUI } from './TelegramUI.js';
 import { AccessControlService } from '../services/AccessControlService.js';
 import { ApiClient } from '../services/ApiClient.js';
+import { ExplanatoryService } from '../services/ExplanatoryService.js';
 import { startDirectorHourlyReportScheduler,startAssigneeReminderScheduler5min } from '../services/ReportScheduler.js';
 
 // Нормализация статуса к БД
@@ -167,6 +168,7 @@ export class BotApp {
     this.assistant = new AssistantService({ bot: this.bot }); // <-- фикс
     this.employees = new EmployeesService(api);
     this.notifier = new Notifier(this.bot);
+    this.explanatory = new ExplanatoryService();
     this.tools = new ToolRouter({ api, employees: this.employees, notifier: this.notifier });
     this.acl = new AccessControlService({ employees: this.employees });
     this.uiState = new Map();
@@ -177,7 +179,7 @@ export class BotApp {
 
 	    // 🕒 Ежечасный отчёт директору (Asia/Dushanbe)
     process.env.TZ = process.env.TZ || 'Asia/Dushanbe';
-    startDirectorHourlyReportScheduler({ api: this.api, toolRouter: this.tools, notifier: this.notifier });
+    startDirectorHourlyReportScheduler({ api: this.api, toolRouter: this.tools, notifier: this.notifier, explanatoryService: this.explanatory });
     startAssigneeReminderScheduler5min({ api: this.api, toolRouter: this.tools, notifier: this.notifier });
   }
 
@@ -191,6 +193,175 @@ export class BotApp {
         '🔍 Пришлите текст или голосовой вопрос — я спрошу ИИ-агента и/или выполню действия с задачами.\n\nГлавное меню:',
         TelegramUI.mainMenuInline()
       );
+    });
+
+    // Команда для отправки объяснительной
+    this.bot.onText(/^\/explanation\s+(\d+)\s+(.+)$/, async (msg, match) => {
+      const auth = await this.acl.authorize(msg.from?.id);
+      if (!auth.allowed) return;
+
+      const explanationId = Number(match[1]);
+      const explanationText = match[2];
+
+      try {
+        const result = await this.tools.route('submit_explanation', {
+          explanationId: explanationId,
+          explanationText: explanationText
+        }, {
+          requesterChatId: String(msg.chat.id),
+          requesterEmployee: auth.employee
+        });
+
+        if (result.ok) {
+          await this.bot.sendMessage(msg.chat.id, '✅ Объяснительная успешно отправлена на рассмотрение директору.');
+        } else {
+          await this.bot.sendMessage(msg.chat.id, `❌ Ошибка: ${result.error}`);
+        }
+      } catch (error) {
+        log.error('[BotApp] Ошибка отправки объяснительной:', error.message);
+        await this.bot.sendMessage(msg.chat.id, '❌ Произошла ошибка при отправке объяснительной.');
+      }
+    });
+
+    // Команда для просмотра ожидающих объяснительных (только для директоров)
+    this.bot.onText(/^\/explanations$/, async (msg) => {
+      const auth = await this.acl.authorize(msg.from?.id);
+      if (!auth.allowed) return;
+
+      if (auth.employee.user_role !== 'manager') {
+        await this.bot.sendMessage(msg.chat.id, '❌ Доступ запрещен. Только директора могут просматривать объяснительные.');
+        return;
+      }
+
+      try {
+        const result = await this.tools.route('list_pending_explanations', {
+          limit: 10
+        }, {
+          requesterChatId: String(msg.chat.id),
+          requesterEmployee: auth.employee
+        });
+
+        if (result.ok && result.explanations.length > 0) {
+          let message = '📝 Ожидающие рассмотрения объяснительные:\n\n';
+          
+          for (const exp of result.explanations) {
+            message += `ID: ${exp.id}\n`;
+            message += `Задача: ${exp.task}\n`;
+            message += `Сотрудник: ${exp.employee_name}\n`;
+            message += `Объяснение: ${exp.explanation_text}\n`;
+            message += `Дата: ${new Date(exp.responded_at).toLocaleString('ru-RU')}\n`;
+            message += `\nКоманды для рассмотрения:\n`;
+            message += `/accept ${exp.id} [комментарий] - принять\n`;
+            message += `/reject ${exp.id} [комментарий] - отклонить\n`;
+            message += `/penalty ${exp.id} [сумма] [комментарий] - наказать\n\n`;
+          }
+          
+          await this.bot.sendMessage(msg.chat.id, message);
+        } else {
+          await this.bot.sendMessage(msg.chat.id, '✅ Нет ожидающих рассмотрения объяснительных.');
+        }
+      } catch (error) {
+        log.error('[BotApp] Ошибка получения объяснительных:', error.message);
+        await this.bot.sendMessage(msg.chat.id, '❌ Произошла ошибка при получении объяснительных.');
+      }
+    });
+
+    // Команда для принятия объяснительной
+    this.bot.onText(/^\/accept\s+(\d+)\s+(.+)$/, async (msg, match) => {
+      const auth = await this.acl.authorize(msg.from?.id);
+      if (!auth.allowed || auth.employee.user_role !== 'manager') {
+        await this.bot.sendMessage(msg.chat.id, '❌ Доступ запрещен.');
+        return;
+      }
+
+      const explanationId = Number(match[1]);
+      const comment = match[2];
+
+      try {
+        const result = await this.tools.route('review_explanation', {
+          explanationId: explanationId,
+          decision: 'accept',
+          managerDecision: comment
+        }, {
+          requesterChatId: String(msg.chat.id),
+          requesterEmployee: auth.employee
+        });
+
+        if (result.ok) {
+          await this.bot.sendMessage(msg.chat.id, '✅ Объяснительная принята.');
+        } else {
+          await this.bot.sendMessage(msg.chat.id, `❌ Ошибка: ${result.error}`);
+        }
+      } catch (error) {
+        log.error('[BotApp] Ошибка принятия объяснительной:', error.message);
+        await this.bot.sendMessage(msg.chat.id, '❌ Произошла ошибка при принятии объяснительной.');
+      }
+    });
+
+    // Команда для отклонения объяснительной
+    this.bot.onText(/^\/reject\s+(\d+)\s+(.+)$/, async (msg, match) => {
+      const auth = await this.acl.authorize(msg.from?.id);
+      if (!auth.allowed || auth.employee.user_role !== 'manager') {
+        await this.bot.sendMessage(msg.chat.id, '❌ Доступ запрещен.');
+        return;
+      }
+
+      const explanationId = Number(match[1]);
+      const comment = match[2];
+
+      try {
+        const result = await this.tools.route('review_explanation', {
+          explanationId: explanationId,
+          decision: 'reject',
+          managerDecision: comment
+        }, {
+          requesterChatId: String(msg.chat.id),
+          requesterEmployee: auth.employee
+        });
+
+        if (result.ok) {
+          await this.bot.sendMessage(msg.chat.id, '❌ Объяснительная отклонена.');
+        } else {
+          await this.bot.sendMessage(msg.chat.id, `❌ Ошибка: ${result.error}`);
+        }
+      } catch (error) {
+        log.error('[BotApp] Ошибка отклонения объяснительной:', error.message);
+        await this.bot.sendMessage(msg.chat.id, '❌ Произошла ошибка при отклонении объяснительной.');
+      }
+    });
+
+    // Команда для наказания (лишение бонуса)
+    this.bot.onText(/^\/penalty\s+(\d+)\s+(\d+(?:\.\d+)?)\s+(.+)$/, async (msg, match) => {
+      const auth = await this.acl.authorize(msg.from?.id);
+      if (!auth.allowed || auth.employee.user_role !== 'manager') {
+        await this.bot.sendMessage(msg.chat.id, '❌ Доступ запрещен.');
+        return;
+      }
+
+      const explanationId = Number(match[1]);
+      const penaltyAmount = Number(match[2]);
+      const comment = match[3];
+
+      try {
+        const result = await this.tools.route('review_explanation', {
+          explanationId: explanationId,
+          decision: 'penalty',
+          managerDecision: comment,
+          bonusPenaltyAmount: penaltyAmount
+        }, {
+          requesterChatId: String(msg.chat.id),
+          requesterEmployee: auth.employee
+        });
+
+        if (result.ok) {
+          await this.bot.sendMessage(msg.chat.id, `💰 Предложено лишение бонуса в размере ${penaltyAmount} сом.`);
+        } else {
+          await this.bot.sendMessage(msg.chat.id, `❌ Ошибка: ${result.error}`);
+        }
+      } catch (error) {
+        log.error('[BotApp] Ошибка наказания:', error.message);
+        await this.bot.sendMessage(msg.chat.id, '❌ Произошла ошибка при наложении наказания.');
+      }
     });
 
     this.bot.on('callback_query', async (q) => this.onCallbackQuery(q));
