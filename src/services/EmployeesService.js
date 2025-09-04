@@ -13,12 +13,14 @@ function parseSkills(v) {
 
 const toEmployee = (row) => ({
 	id: row.employee_id,
+	employee_id: row.employee_id, // Сохраняем оригинальное поле
 	name: row.name,
 	position: row.job || null,
 	phone: row.phone || null,
 	email: row.email || null,
 	skills: parseSkills(row.skills),
-	tg_user_id: row.chat_id ? String(row.chat_id) : null,
+	chat_id: row.chat_id ? String(row.chat_id) : null, // Сохраняем chat_id
+	tg_user_id: row.chat_id ? String(row.chat_id) : null, // Для совместимости
 	user_role: row.user_role || 'employee',
 	created_at: row.created_at || null,
 	updated_at: row.updated_at || null,

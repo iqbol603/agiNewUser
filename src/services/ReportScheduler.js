@@ -877,7 +877,7 @@ async function notifyEmployeesAboutExplanations(requests, toolRouter, notifier) 
 
 /* ---------- Директорский отчёт ---------- */
 
-async function buildReport({ toolRouter, api, explanatoryService }) {
+async function buildReport({ toolRouter, api, explanatoryService, notifier }) {
   const [employees, tasks] = await Promise.all([
     fetchEmployees(toolRouter, api),
     fetchTasks(toolRouter, api)
@@ -907,6 +907,12 @@ async function buildReport({ toolRouter, api, explanatoryService }) {
     try {
       explanationRequests = await requestExplanationsForOverdueTasks(overdue, employeesById, explanatoryService);
       console.log(`[ReportScheduler] Создано ${explanationRequests.length} запросов объяснительных`);
+      
+      // Отправляем уведомления сотрудникам о необходимости объяснительных
+      if (explanationRequests.length > 0) {
+        await notifyEmployeesAboutExplanations(explanationRequests, toolRouter, notifier);
+        console.log(`[ReportScheduler] Отправлено ${explanationRequests.length} уведомлений сотрудникам`);
+      }
     } catch (error) {
       console.error('[ReportScheduler] Ошибка создания запросов объяснительных:', error.message);
     }
@@ -1157,7 +1163,7 @@ async function deliverAssigneeReminders({ toolRouter, api, notifier }) {
 export function startDirectorHourlyReportScheduler({ api, toolRouter, notifier, explanatoryService }) {
   const task = cron.schedule('0 * * * *', async () => {
     try {
-      const text = await buildReport({ toolRouter, api, explanatoryService });
+      const text = await buildReport({ toolRouter, api, explanatoryService, notifier });
       await deliverReport({ toolRouter, api, notifier, text });
       console.log('[ReportScheduler] director report sent at', new Date().toISOString());
     } catch (e) {
@@ -1187,8 +1193,8 @@ export function startAssigneeReminderScheduler5min({ api, toolRouter, notifier }
 }
 
 // Для ручного запуска (разово)
-export async function runDirectorReportOnce({ api, toolRouter, notifier }) {
-  const text = await buildReport({ toolRouter, api });
+export async function runDirectorReportOnce({ api, toolRouter, notifier, explanatoryService }) {
+  const text = await buildReport({ toolRouter, api, explanatoryService, notifier });
   await deliverReport({ toolRouter, api, notifier, text });
 }
 

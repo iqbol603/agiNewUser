@@ -37,10 +37,13 @@ export class ExplanatoryService {
    */
   async requestExplanation(taskId, employeeId, taskTitle, deadline) {
     try {
+      // Используем простой английский текст для избежания проблем с кодировкой
+      const explanationText = `Explanation request for task ID: ${taskId}`;
+      
       const result = await query(`
         INSERT INTO employee_explanations (task_id, employee_id, explanation_text, status)
-        VALUES (?, ?, ?, 'pending')
-      `, [taskId, employeeId, `Explanation request for task: ${taskTitle}`, 'pending']);
+        VALUES (?, ?, ?, ?)
+      `, [taskId, employeeId, explanationText, 'pending']);
 
       log.info(`[ExplanatoryService] Запрос объяснительной создан для задачи ${taskId}, сотрудника ${employeeId}`);
       return result.insertId;
