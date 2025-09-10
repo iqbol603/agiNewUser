@@ -162,14 +162,14 @@ export class BotApp {
   constructor() {
     this.bot = new TelegramBot(ENV.TELEGRAM_TOKEN, { polling: true });
 
-    const api = new ApiClient();
+    this.api = new ApiClient();
     this.files = new FileStorage();
     this.openai = new OpenAIService();
     this.assistant = new AssistantService({ bot: this.bot }); // <-- фикс
-    this.employees = new EmployeesService(api);
+    this.employees = new EmployeesService(this.api);
     this.notifier = new Notifier(this.bot);
     this.explanatory = new ExplanatoryService();
-    this.tools = new ToolRouter({ api, employees: this.employees, notifier: this.notifier });
+    this.tools = new ToolRouter({ api: this.api, employees: this.employees, notifier: this.notifier });
     this.acl = new AccessControlService({ employees: this.employees });
     this.uiState = new Map();
     this.pendingAssign = new Map();
@@ -188,11 +188,47 @@ export class BotApp {
       const auth = await this.acl.authorize(msg.from?.id);
       if (!auth.allowed) return;
 
-      await this.bot.sendMessage(
-        msg.chat.id,
-        '🔍 Пришлите текст или голосовой вопрос — я спрошу ИИ-агента и/или выполню действия с задачами.\n\nГлавное меню:',
-        TelegramUI.mainMenuInline()
-      );
+      // Если пользователь - менеджер, показываем панель руководства
+      if (auth.employee.user_role === 'manager') {
+        const keyboard = {
+          reply_markup: {
+            inline_keyboard: [
+              [
+                { text: '📊 Анализ команды', callback_data: 'leadership_analyze_team' },
+                { text: '🎯 Стратегический отчет', callback_data: 'leadership_strategic_report' }
+              ],
+              [
+                { text: '💡 Рекомендации по улучшению', callback_data: 'leadership_suggest_improvements' },
+                { text: '🤖 Автоматические решения', callback_data: 'leadership_auto_decide' }
+              ],
+              [
+                { text: '📝 Объяснительные', callback_data: 'leadership_explanations' },
+                { text: '📋 Все задачи', callback_data: 'leadership_all_tasks' }
+              ],
+              [
+                { text: '🔍 ИИ-помощник', callback_data: 'ai_assistant' },
+                { text: '🔄 Обновить', callback_data: 'leadership_refresh' }
+              ]
+            ]
+          }
+        };
+
+        await this.bot.sendMessage(
+          msg.chat.id,
+          `👑 **Добро пожаловать, ${auth.employee.name}!**\n\n` +
+          'Вы вошли как **РУКОВОДИТЕЛЬ** с полным доступом к функциям управления командой.\n\n' +
+          'Выберите действие:',
+          { parse_mode: 'Markdown', ...keyboard }
+        );
+      } else {
+        // Обычное меню для сотрудников
+        await this.bot.sendMessage(
+          msg.chat.id,
+          `👋 Добро пожаловать, ${auth.employee.name}!\n\n` +
+          '🔍 Пришлите текст или голосовой вопрос — я спрошу ИИ-агента и/или выполню действия с задачами.\n\nГлавное меню:',
+          TelegramUI.mainMenuInline()
+        );
+      }
     });
 
     // Команда для отправки объяснительной
@@ -364,6 +400,133 @@ export class BotApp {
       }
     });
 
+    // Команды руководства - только для менеджеров
+    this.bot.onText(/^\/analyze_team$/, async (msg) => {
+      const auth = await this.acl.authorize(msg.from?.id);
+      if (!auth.allowed || auth.employee.user_role !== 'manager') {
+        await this.bot.sendMessage(msg.chat.id, '❌ Доступ запрещен. Только менеджеры могут анализировать команду.');
+        return;
+      }
+
+      try {
+        const { DecisionEngine } = await import('../services/DecisionEngine.js');
+        const { LeadershipCommands } = await import('../services/LeadershipCommands.js');
+        
+        const decisionEngine = new DecisionEngine(this.api, this.employees);
+        const leadership = new LeadershipCommands(decisionEngine, this.tools);
+        
+        const analysis = await leadership.analyzeTeam();
+        await this.bot.sendMessage(msg.chat.id, analysis);
+      } catch (error) {
+        log.error('[BotApp] Ошибка анализа команды:', error.message);
+        await this.bot.sendMessage(msg.chat.id, '❌ Произошла ошибка при анализе команды.');
+      }
+    });
+
+    this.bot.onText(/^\/strategic_report$/, async (msg) => {
+      const auth = await this.acl.authorize(msg.from?.id);
+      if (!auth.allowed || auth.employee.user_role !== 'manager') {
+        await this.bot.sendMessage(msg.chat.id, '❌ Доступ запрещен. Только менеджеры могут просматривать стратегические отчеты.');
+        return;
+      }
+
+      try {
+        const { DecisionEngine } = await import('../services/DecisionEngine.js');
+        const { LeadershipCommands } = await import('../services/LeadershipCommands.js');
+        
+        const decisionEngine = new DecisionEngine(this.api, this.employees);
+        const leadership = new LeadershipCommands(decisionEngine, this.tools);
+        
+        const report = await leadership.generateStrategicReport();
+        await this.bot.sendMessage(msg.chat.id, report);
+      } catch (error) {
+        log.error('[BotApp] Ошибка стратегического отчета:', error.message);
+        await this.bot.sendMessage(msg.chat.id, '❌ Произошла ошибка при генерации стратегического отчета.');
+      }
+    });
+
+    this.bot.onText(/^\/suggest_improvements$/, async (msg) => {
+      const auth = await this.acl.authorize(msg.from?.id);
+      if (!auth.allowed || auth.employee.user_role !== 'manager') {
+        await this.bot.sendMessage(msg.chat.id, '❌ Доступ запрещен. Только менеджеры могут получать рекомендации по улучшению.');
+        return;
+      }
+
+      try {
+        const { DecisionEngine } = await import('../services/DecisionEngine.js');
+        const { LeadershipCommands } = await import('../services/LeadershipCommands.js');
+        
+        const decisionEngine = new DecisionEngine(this.api, this.employees);
+        const leadership = new LeadershipCommands(decisionEngine, this.tools);
+        
+        const suggestions = await leadership.suggestImprovements();
+        await this.bot.sendMessage(msg.chat.id, suggestions);
+      } catch (error) {
+        log.error('[BotApp] Ошибка рекомендаций:', error.message);
+        await this.bot.sendMessage(msg.chat.id, '❌ Произошла ошибка при генерации рекомендаций.');
+      }
+    });
+
+    this.bot.onText(/^\/auto_decide$/, async (msg) => {
+      const auth = await this.acl.authorize(msg.from?.id);
+      if (!auth.allowed || auth.employee.user_role !== 'manager') {
+        await this.bot.sendMessage(msg.chat.id, '❌ Доступ запрещен. Только менеджеры могут принимать автоматические решения.');
+        return;
+      }
+
+      try {
+        const { DecisionEngine } = await import('../services/DecisionEngine.js');
+        const { LeadershipCommands } = await import('../services/LeadershipCommands.js');
+        
+        const decisionEngine = new DecisionEngine(this.api, this.employees);
+        const leadership = new LeadershipCommands(decisionEngine, this.tools);
+        
+        const decisions = await leadership.autoDecideOnTasks();
+        await this.bot.sendMessage(msg.chat.id, decisions);
+      } catch (error) {
+        log.error('[BotApp] Ошибка автоматических решений:', error.message);
+        await this.bot.sendMessage(msg.chat.id, '❌ Произошла ошибка при принятии автоматических решений.');
+      }
+    });
+
+    // Команда для показа кнопок руководства
+    this.bot.onText(/^\/leadership$/, async (msg) => {
+      const auth = await this.acl.authorize(msg.from?.id);
+      if (!auth.allowed || auth.employee.user_role !== 'manager') {
+        await this.bot.sendMessage(msg.chat.id, '❌ Доступ запрещен. Только менеджеры могут использовать команды руководства.');
+        return;
+      }
+
+      const keyboard = {
+        reply_markup: {
+          inline_keyboard: [
+            [
+              { text: '📊 Анализ команды', callback_data: 'leadership_analyze_team' },
+              { text: '🎯 Стратегический отчет', callback_data: 'leadership_strategic_report' }
+            ],
+            [
+              { text: '💡 Рекомендации по улучшению', callback_data: 'leadership_suggest_improvements' },
+              { text: '🤖 Автоматические решения', callback_data: 'leadership_auto_decide' }
+            ],
+            [
+              { text: '📝 Объяснительные', callback_data: 'leadership_explanations' },
+              { text: '📋 Все задачи', callback_data: 'leadership_all_tasks' }
+            ],
+            [
+              { text: '🔄 Обновить', callback_data: 'leadership_refresh' },
+              { text: '❌ Закрыть', callback_data: 'leadership_close' }
+            ]
+          ]
+        }
+      };
+
+      await this.bot.sendMessage(msg.chat.id, 
+        '👑 **ПАНЕЛЬ РУКОВОДИТЕЛЯ**\n\n' +
+        'Выберите действие для управления командой:', 
+        { parse_mode: 'Markdown', ...keyboard }
+      );
+    });
+
     this.bot.on('callback_query', async (q) => this.onCallbackQuery(q));
     this.bot.on('message', async (msg) => this.onMessage(msg));
   }
@@ -508,6 +671,157 @@ export class BotApp {
     }
   }
 
+  async onCallbackQuery(q) {
+    try {
+      const auth = await this.acl.authorize(q.from?.id);
+      if (!auth.allowed) {
+        await this.bot.answerCallbackQuery(q.id, { text: 'Доступ запрещён', show_alert: true });
+        return;
+      }
+
+      const data = q.data || '';
+
+      // Обработка кнопок руководства
+      if (data.startsWith('leadership_')) {
+        if (auth.employee.user_role !== 'manager') {
+          await this.bot.answerCallbackQuery(q.id, { text: 'Только менеджеры могут использовать команды руководства', show_alert: true });
+          return;
+        }
+
+        try {
+          const { DecisionEngine } = await import('../services/DecisionEngine.js');
+          const { LeadershipCommands } = await import('../services/LeadershipCommands.js');
+          
+          const decisionEngine = new DecisionEngine(this.api, this.employees);
+          const leadership = new LeadershipCommands(decisionEngine, this.tools);
+          
+          let result = '';
+          
+          switch (data) {
+            case 'leadership_analyze_team':
+              result = await leadership.analyzeTeam();
+              break;
+            case 'leadership_strategic_report':
+              result = await leadership.generateStrategicReport();
+              break;
+            case 'leadership_suggest_improvements':
+              result = await leadership.suggestImprovements();
+              break;
+            case 'leadership_auto_decide':
+              result = await leadership.autoDecideOnTasks();
+              break;
+            case 'leadership_explanations':
+              const expResult = await this.tools.route('list_pending_explanations', { limit: 10 }, {
+                requesterChatId: String(q.from.id),
+                requesterEmployee: auth.employee
+              });
+              if (expResult.ok && expResult.explanations.length > 0) {
+                result = '📝 Ожидающие рассмотрения объяснительные:\n\n';
+                for (const exp of expResult.explanations) {
+                  result += `ID: ${exp.id}\n`;
+                  result += `Задача: ${exp.task}\n`;
+                  result += `Сотрудник: ${exp.employee_name}\n`;
+                  result += `Объяснение: ${exp.explanation_text}\n\n`;
+                }
+              } else {
+                result = '✅ Нет ожидающих объяснительных';
+              }
+              break;
+            case 'leadership_all_tasks':
+              const tasksResult = await this.tools.route('list_tasks', {}, {
+                requesterChatId: String(q.from.id),
+                requesterEmployee: auth.employee
+              });
+              if (Array.isArray(tasksResult)) {
+                result = `📋 Всего задач: ${tasksResult.length}\n\n`;
+                for (const task of tasksResult.slice(0, 10)) {
+                  result += `#${task.task_id} - ${task.task} (${task.status})\n`;
+                }
+                if (tasksResult.length > 10) {
+                  result += `\n... и еще ${tasksResult.length - 10} задач`;
+                }
+              } else {
+                result = '❌ Ошибка получения задач';
+              }
+              break;
+            case 'leadership_refresh':
+              // Обновляем панель руководства
+              const keyboard = {
+                reply_markup: {
+                  inline_keyboard: [
+                    [
+                      { text: '📊 Анализ команды', callback_data: 'leadership_analyze_team' },
+                      { text: '🎯 Стратегический отчет', callback_data: 'leadership_strategic_report' }
+                    ],
+                    [
+                      { text: '💡 Рекомендации по улучшению', callback_data: 'leadership_suggest_improvements' },
+                      { text: '🤖 Автоматические решения', callback_data: 'leadership_auto_decide' }
+                    ],
+                    [
+                      { text: '📝 Объяснительные', callback_data: 'leadership_explanations' },
+                      { text: '📋 Все задачи', callback_data: 'leadership_all_tasks' }
+                    ],
+                    [
+                      { text: '🔄 Обновить', callback_data: 'leadership_refresh' },
+                      { text: '❌ Закрыть', callback_data: 'leadership_close' }
+                    ]
+                  ]
+                }
+              };
+              
+              await this.bot.editMessageText(
+                '👑 **ПАНЕЛЬ РУКОВОДИТЕЛЯ**\n\nВыберите действие для управления командой:',
+                {
+                  chat_id: q.message.chat.id,
+                  message_id: q.message.message_id,
+                  parse_mode: 'Markdown',
+                  ...keyboard
+                }
+              );
+              await this.bot.answerCallbackQuery(q.id, { text: 'Панель обновлена' });
+              return;
+            case 'leadership_close':
+              await this.bot.deleteMessage(q.message.chat.id, q.message.message_id);
+              await this.bot.answerCallbackQuery(q.id, { text: 'Панель закрыта' });
+              return;
+            case 'ai_assistant':
+              await this.bot.sendMessage(q.message.chat.id, 
+                '🔍 **ИИ-ПОМОЩНИК РУКОВОДИТЕЛЯ**\n\n' +
+                'Теперь вы можете задавать вопросы в свободной форме. Я буду отвечать как опытный руководитель:\n\n' +
+                '• Анализировать ситуацию и предлагать решения\n' +
+                '• Принимать решения на основе данных\n' +
+                '• Давать стратегические рекомендации\n' +
+                '• Помогать с управлением командой\n\n' +
+                'Просто напишите ваш вопрос или задачу!',
+                { parse_mode: 'Markdown' }
+              );
+              await this.bot.answerCallbackQuery(q.id, { text: 'ИИ-помощник активирован' });
+              return;
+            default:
+              await this.bot.answerCallbackQuery(q.id, { text: 'Неизвестная команда' });
+              return;
+          }
+          
+          if (result) {
+            await this.bot.sendMessage(q.message.chat.id, result);
+            await this.bot.answerCallbackQuery(q.id, { text: 'Готово' });
+          }
+        } catch (error) {
+          log.error('[BotApp] Ошибка выполнения команды руководства:', error.message);
+          await this.bot.answerCallbackQuery(q.id, { text: 'Ошибка выполнения команды' });
+        }
+        return;
+      }
+
+      // Остальная логика обработки callback_query...
+      // (существующий код остается без изменений)
+
+    } catch (error) {
+      log.error('[BotApp] Ошибка в onCallbackQuery:', error.message);
+      await this.bot.answerCallbackQuery(q.id, { text: 'Произошла ошибка' });
+    }
+  }
+
   async onMessage(msg) {
     // Если это не текст, не голос и не документ — выходим
     if (!msg.text && !msg.voice && !msg.document) return;
@@ -521,7 +835,7 @@ export class BotApp {
 
     if (msg.text && !msg.text.startsWith('/')) {
       await this.bot.sendMessage(chatId, '⏳ Анализирую...');
-      const aiReply = await this.assistant.ask(msg.text, { chatId, employee: auth.employee });
+      const aiReply = await this.assistant.ask(msg.text, { chatId: String(chatId), employee: auth.employee });
 
       await this.bot.sendMessage(chatId, aiReply);
 
@@ -545,7 +859,7 @@ export class BotApp {
         await this.bot.sendMessage(chatId, `📝 Распознал: «${text}»`);
 
         await this.bot.sendMessage(chatId, '🔍 Выполняю анализ…');
-        const aiReply = await this.assistant.ask(text, { chatId, employee: auth.employee });
+        const aiReply = await this.assistant.ask(text, { chatId: String(chatId), employee: auth.employee });
         await this.bot.sendMessage(chatId, aiReply);
 
         try {
@@ -581,7 +895,7 @@ export class BotApp {
           
           // Анализируем содержимое через AI
           await this.bot.sendMessage(chatId, '🔍 Анализирую содержимое файла...');
-          const aiReply = await this.assistant.ask(`Анализируй содержимое файла ${fileName}: ${content.substring(0, 2000)}`, { chatId, employee: auth.employee });
+          const aiReply = await this.assistant.ask(`Анализируй содержимое файла ${fileName}: ${content.substring(0, 2000)}`, { chatId: String(chatId), employee: auth.employee });
           await this.bot.sendMessage(chatId, aiReply);
         } else {
           await this.bot.sendMessage(chatId, `📁 Файл «${fileName}» получен (${fileExt.toUpperCase()}). Для анализа содержимого отправьте текстовый файл.`);

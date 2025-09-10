@@ -1474,8 +1474,8 @@ export class AssistantService {
       await this.ensureStorage(); // ← ключевое: решаем, БД или ОЗУ
 
       const userMeta = {
-        tg_chat_id: ctx?.chatId ? String(ctx.chatId) : '',
-        employee_id: ctx?.employee?.id ? String(ctx.employee.id) : '',
+        tg_chat_id: ctx?.chatId ? String(ctx.chatId) : (ctx?.tg_chat_id ? String(ctx.tg_chat_id) : ''),
+        employee_id: ctx?.employee?.id ? String(ctx.employee.id) : (ctx?.employee?.employee_id ? String(ctx.employee.employee_id) : ''),
         employee_name: ctx?.employee?.name || '',
         employee_position: ctx?.employee?.position || '',
         user_role: deriveRole(ctx?.employee)
@@ -1499,6 +1499,12 @@ export class AssistantService {
       });
 
       // Лог в "вечную" память (если БД есть)
+      log.info('[AI] Сохраняем сообщение пользователя:', { 
+        chatId: userMeta.tg_chat_id, 
+        role: 'user', 
+        contentLength: userText.length,
+        employee: userMeta.employee_name 
+      });
       await this.safeLogMessage({ chatId: userMeta.tg_chat_id, role: 'user', content: userText, meta: userMeta });
 
       // Автоматически определяем, спрашивает ли пользователь об истории
@@ -1581,6 +1587,14 @@ export class AssistantService {
 — Отвечайте кратко, приветствуйте пользователя по имени.
 — Если пользователь спросит о себе, поищите и предоставьте информацию по его чат ID ${userMeta.tg_chat_id}.
 — Всегда выводите ID задачи рядом с задачей.
+
+РУКОВОДЯЩЕЕ ПОВЕДЕНИЕ:
+— Если пользователь - менеджер, ведите себя как опытный руководитель: анализируйте ситуацию, предлагайте решения, принимайте решения.
+— При создании задач автоматически анализируйте сложность и устанавливайте реалистичные дедлайны.
+— Предлагайте оптимизацию процессов и улучшения на основе данных.
+— Используйте команды руководства: /analyze_team, /strategic_report, /suggest_improvements, /auto_decide.
+— При проблемах с производительностью предлагайте конкретные действия и решения.
+— Думайте стратегически: анализируйте тренды, прогнозируйте риски, предлагайте улучшения.
 
 ${isHistoryQuestion || detectedDate || extractedKeywords.length > 0 ? '🚨 ВНИМАНИЕ: Пользователь спрашивает об истории разговоров!' + (detectedDate ? ` Запрошена конкретная дата: ${detectedDate}` : '') + (extractedKeywords.length > 0 ? ` Ключевые слова: ${extractedKeywords.join(', ')}` : '') + ' ОБЯЗАТЕЛЬНО вызовите history_get и покажите историю!' : ''}
 
@@ -1845,6 +1859,12 @@ ${extractedKeywords.length > 0 ? `ВАЖНО: Пользователь упом�
       const text = (reply?.content || []).filter(c => c.type === 'text').map(c => c.text?.value || '').join('\n').trim();
 
       // Логируем ответ ассистента (если БД доступна)
+      log.info('[AI] Сохраняем ответ ассистента:', { 
+        chatId: userMeta.tg_chat_id, 
+        role: 'assistant', 
+        contentLength: (text || '').length,
+        employee: userMeta.employee_name 
+      });
       await this.safeLogMessage({
         chatId: userMeta.tg_chat_id,
         role: 'assistant',
