@@ -814,25 +814,55 @@ export class BotApp {
       
       if (data === 'explanations') {
         try {
-          const expResult = await this.tools.route('list_pending_explanations', { limit: 10 }, {
-            requesterChatId: String(q.from.id),
-            requesterEmployee: auth.employee
-          });
-          if (expResult.ok && expResult.explanations && expResult.explanations.length > 0) {
-            let result = '📝 ОЖИДАЮЩИЕ РАССМОТРЕНИЯ ОБЪЯСНИТЕЛЬНЫЕ:\n\n';
-            for (const exp of expResult.explanations) {
-              result += `🆔 ID: ${exp.id}\n`;
-              result += `📋 Задача: ${exp.task}\n`;
-              result += `👤 Сотрудник: ${exp.employee_name}\n`;
-              result += `📝 Объяснение: ${exp.explanation_text}\n`;
-              result += `📅 Дата: ${new Date(exp.responded_at).toLocaleString('ru-RU')}\n`;
-              result += `⏰ Статус: Ожидает рассмотрения\n`;
-              result += `\n${'─'.repeat(40)}\n\n`;
+          if (auth.employee.user_role === 'manager') {
+            const all = await this.tools.route('list_all_explanations', { limit: 10 }, {
+              requesterChatId: String(q.from.id),
+              requesterEmployee: auth.employee
+            });
+            if (all.ok) {
+              let result = '🗂 ОБЪЯСНИТЕЛЬНЫЕ (для менеджера)\n\n';
+              const sections = [
+                { title: '⏳ Ожидают ответа сотрудника', list: all.awaitingUser || [] },
+                { title: '📝 Ожидают рассмотрения', list: all.forReview || [] },
+                { title: '✅ Решённые', list: all.resolved || [] }
+              ];
+              for (const s of sections) {
+                result += `${s.title}:\n`;
+                if (s.list.length === 0) {
+                  result += '  —\n\n';
+                  continue;
+                }
+                for (const exp of s.list) {
+                  result += `  • ID:${exp.id} | Task:${exp.task_id} | ${exp.employee_name || '—'} | ${exp.status}` + (exp.responded_at ? ` | ответ: ${new Date(exp.responded_at).toLocaleString('ru-RU')}` : '') + '\n';
+                }
+                result += '\n';
+              }
+              await this.bot.answerCallbackQuery(q.id, { text: 'Сводка объяснительных' });
+              await this.bot.sendMessage(q.from.id, result);
+            } else {
+              await this.bot.answerCallbackQuery(q.id, { text: 'Ошибка загрузки объяснительных' });
             }
-            await this.bot.answerCallbackQuery(q.id, { text: 'Список объяснительных отправлен' });
-            await this.bot.sendMessage(q.from.id, result);
           } else {
-            await this.bot.answerCallbackQuery(q.id, { text: 'Нет ожидающих объяснительных' });
+            const myExp = await this.tools.route('list_my_explanations', { limit: 10 }, {
+              requesterChatId: String(q.from.id),
+              requesterEmployee: auth.employee
+            });
+            if (myExp.ok && Array.isArray(myExp.explanations) && myExp.explanations.length > 0) {
+              let result = '🗂 МОИ ОБЪЯСНИТЕЛЬНЫЕ:\n\n';
+              for (const exp of myExp.explanations) {
+                result += `🆔 ID: ${exp.id}\n`;
+                result += `📋 Задача: ${exp.task || '—'}\n`;
+                result += `⏳ Запрошено: ${exp.requested_at ? new Date(exp.requested_at).toLocaleString('ru-RU') : '—'}\n`;
+                result += `📝 Текст: ${exp.explanation_text || '—'}\n`;
+                result += `📅 Ответ: ${exp.responded_at ? new Date(exp.responded_at).toLocaleString('ru-RU') : '—'}\n`;
+                result += `⏰ Статус: ${exp.status}\n`;
+                result += `\n${'─'.repeat(40)}\n\n`;
+              }
+              await this.bot.answerCallbackQuery(q.id, { text: 'Ваши объяснительные отправлены' });
+              await this.bot.sendMessage(q.from.id, result);
+            } else {
+              await this.bot.answerCallbackQuery(q.id, { text: 'У вас нет объяснительных' });
+            }
           }
         } catch (error) {
           await this.bot.answerCallbackQuery(q.id, { text: 'Ошибка получения объяснительных' });

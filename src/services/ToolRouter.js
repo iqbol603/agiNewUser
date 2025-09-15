@@ -244,6 +244,27 @@ export const TOOL_SCHEMAS = [
   {
     type: 'function',
     function: {
+      name: 'list_all_explanations',
+      description: 'Получить все объяснительные (для менеджера): ожидают ответа, на рассмотрении, решённые',
+      parameters: {
+        type: 'object',
+        properties: {
+          limit: { type: 'number', description: 'Максимум записей на раздел (по умолчанию 10)' }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'list_my_explanations',
+      description: 'Получить мои последние объяснительные (для staff)',
+      parameters: { type: 'object', properties: { limit: { type: 'number' } } }
+    }
+  },
+  {
+    type: 'function',
+    function: {
       name: 'force_close_task',
       description: 'Принудительно закрыть задачу (обходит все проверки)',
       parameters: {
@@ -946,6 +967,50 @@ export class ToolRouter {
         return { ok: true, explanations: explanations.slice(0, limit) };
       } catch (error) {
         log.error('[ToolRouter] Ошибка получения объяснительных:', error.message);
+        return { ok: false, error: error.message };
+      }
+    }
+
+    // ---- LIST ALL EXPLANATIONS (manager) ----
+    if (name === 'list_all_explanations') {
+      try {
+        if (!ctx?.requesterEmployee || ctx.requesterEmployee.user_role !== 'manager') {
+          return { ok: false, error: 'Недостаточно прав для просмотра объяснительных' };
+        }
+
+        const limit = Number(args?.limit || 10);
+        const { ExplanatoryService } = await import('./ExplanatoryService.js');
+        const explanatoryService = new ExplanatoryService();
+
+        // три выборки
+        const awaitingUser = await query("SELECT ee.*, t.task, t.deadline, e.name as employee_name FROM employee_explanations ee LEFT JOIN tasks t ON t.task_id = ee.task_id LEFT JOIN employees e ON e.employee_id = ee.employee_id WHERE ee.status='pending' AND ee.responded_at IS NULL ORDER BY ee.requested_at DESC LIMIT ?", [limit]);
+        const forReview = await query("SELECT ee.*, t.task, t.deadline, e.name as employee_name FROM employee_explanations ee LEFT JOIN tasks t ON t.task_id = ee.task_id LEFT JOIN employees e ON e.employee_id = ee.employee_id WHERE ee.status='pending' AND ee.responded_at IS NOT NULL ORDER BY ee.responded_at DESC LIMIT ?", [limit]);
+        const resolved = await query("SELECT ee.*, t.task, t.deadline, e.name as employee_name FROM employee_explanations ee LEFT JOIN tasks t ON t.task_id = ee.task_id LEFT JOIN employees e ON e.employee_id = ee.employee_id WHERE ee.status IN ('accepted','rejected','bonus_penalty') ORDER BY ee.manager_reviewed_at DESC LIMIT ?", [limit]);
+
+        return { ok: true, awaitingUser, forReview, resolved };
+      } catch (error) {
+        log.error('[ToolRouter] Ошибка list_all_explanations:', error.message);
+        return { ok: false, error: error.message };
+      }
+    }
+
+    // ---- LIST MY EXPLANATIONS ----
+    if (name === 'list_my_explanations') {
+      try {
+        const requester = ctx?.requesterEmployee;
+        const employeeId = requester?.employee_id || requester?.id;
+        if (!employeeId) {
+          return { ok: true, explanations: [], message: 'Не удалось определить сотрудника' };
+        }
+
+        const { ExplanatoryService } = await import('./ExplanatoryService.js');
+        const explanatoryService = new ExplanatoryService();
+        const limit = Number(args?.limit || 10);
+
+        const list = await explanatoryService.getEmployeeExplanations(employeeId, limit);
+        return { ok: true, explanations: list };
+      } catch (error) {
+        log.error('[ToolRouter] Ошибка получения собственных объяснительных:', error.message);
         return { ok: false, error: error.message };
       }
     }

@@ -57,7 +57,7 @@ export class ExplanationTimeoutService {
       // Находим объяснительные, которые были запрошены более 1 часа назад и не получили ответ
       const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
       
-      const [rows] = await query(`
+      const rows = await query(`
         SELECT 
           ee.id,
           ee.task_id,
@@ -77,7 +77,7 @@ export class ExplanationTimeoutService {
         return; // Нет просроченных объяснительных
       }
 
-      log.info(`[ExplanationTimeoutService] Найдено ${rows.length} просроченных объяснительных`);
+      log.info(`[ExplanationTimeoutService] Найдено ${Array.isArray(rows) ? rows.length : 0} просроченных объяснительных`);
 
       // Группируем по сотрудникам для удобства
       const overdueByEmployee = {};
@@ -100,7 +100,7 @@ export class ExplanationTimeoutService {
       await this.notifyDirectorAboutOverdueExplanations(overdueByEmployee);
 
       // Обновляем статус объяснительных на "overdue"
-      const explanationIds = rows.map(row => row.id);
+      const explanationIds = (Array.isArray(rows) ? rows : []).map(row => row.id);
       if (explanationIds.length > 0) {
         await query(`
           UPDATE employee_explanations 

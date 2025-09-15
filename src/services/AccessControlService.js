@@ -1,5 +1,6 @@
 import { EmployeesService } from './EmployeesService.js';
 import { log } from '../utils/logger.js';
+import { query } from '../config/db.js';
 
 const asNumber = (v) => {
     const n = Number(String(v ?? '').trim());
@@ -49,7 +50,30 @@ export class AccessControlService {
 		
 		if (!Number.isFinite(id)) return { allowed: false, employee: null };
 
-		const emp = this._cache.byTg.get(id) || null;
+		let emp = this._cache.byTg.get(id) || null;
+
+		// Если не нашли через API — пробуем локальную таблицу employees
+		if (!emp) {
+			try {
+				const rows = await query('SELECT * FROM employees WHERE chat_id = ? LIMIT 1', [String(id)]);
+				const row = Array.isArray(rows) ? rows[0] : rows;
+				if (row) {
+					emp = {
+						id: row.employee_id || row.id || id,
+						employee_id: row.employee_id || row.id || id,
+						name: row.name || `Employee ${id}`,
+						job: row.job || null,
+						chat_id: String(row.chat_id || id),
+						tg_user_id: String(row.chat_id || id),
+						user_role: row.user_role || 'staff'
+					};
+					log.info('[ACL] найден сотрудник в локальной БД по chat_id:', id, 'роль:', emp.user_role);
+				}
+			} catch (e) {
+				log.warn('[ACL] Ошибка запроса локальной таблицы employees:', e.message);
+			}
+		}
+
 		return { allowed: !!emp, employee: emp };
 	}
 
