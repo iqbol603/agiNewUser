@@ -6,6 +6,7 @@ import { query } from '../config/db.js';
 import { log } from '../utils/logger.js';
 import { TaskComplexityAnalyzer } from './TaskComplexityAnalyzer.js';
 import { TaskScheduler } from './TaskScheduler.js';
+import { deadlineValidator } from './DeadlineValidator.js';
 
 const norm = (s) => String(s || '').trim().toLowerCase();
 
@@ -286,6 +287,45 @@ export class ToolRouter {
         log.info(`[ToolRouter] employee_id для API:`, employee_id);
 
         let deadline = String(A.deadline || '').trim();
+        
+        // Валидируем дедлайн, если он указан
+        if (deadline) {
+          const validation = deadlineValidator.validateDeadline(
+            A.title, 
+            A.desc, 
+            A.priority, 
+            deadline, 
+            employee_id
+          );
+          
+          if (!validation.isValid) {
+            let errorMessage = '❌ ОШИБКА ВАЛИДАЦИИ ДЕДЛАЙНА:\n\n';
+            validation.errors.forEach(error => {
+              errorMessage += `• ${error}\n`;
+            });
+            
+            if (validation.suggestedDeadline) {
+              errorMessage += `\n💡 РЕКОМЕНДУЕМЫЙ ДЕДЛАЙН: ${validation.suggestedDeadline.toLocaleString('ru-RU')}\n`;
+            }
+            
+            return { ok: false, error: errorMessage };
+          }
+          
+          if (validation.warnings.length > 0) {
+            let warningMessage = '⚠️ ПРЕДУПРЕЖДЕНИЯ ПО ДЕДЛАЙНУ:\n\n';
+            validation.warnings.forEach(warning => {
+              warningMessage += `• ${warning}\n`;
+            });
+            
+            if (validation.suggestedDeadline) {
+              warningMessage += `\n💡 РЕКОМЕНДУЕМЫЙ ДЕДЛАЙН: ${validation.suggestedDeadline.toLocaleString('ru-RU')}\n`;
+            }
+            
+            warningMessage += `\nПродолжить создание задачи?`;
+            
+            log.warn(`[ToolRouter] Предупреждения валидации дедлайна: ${validation.warnings.join(', ')}`);
+          }
+        }
         
         // Если дедлайн не указан, анализируем сложность задачи и загруженность сотрудника
         if (!deadline) {

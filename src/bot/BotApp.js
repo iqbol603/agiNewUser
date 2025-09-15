@@ -145,6 +145,9 @@ import { AccessControlService } from '../services/AccessControlService.js';
 import { ApiClient } from '../services/ApiClient.js';
 import { ExplanatoryService } from '../services/ExplanatoryService.js';
 import { startDirectorHourlyReportScheduler,startAssigneeReminderScheduler5min } from '../services/ReportScheduler.js';
+import { startExplanationTimeoutService } from '../services/ExplanationTimeoutService.js';
+import { startTaskStatusUpdater } from '../services/TaskStatusUpdater.js';
+import { startBonusPenaltyService } from '../services/BonusPenaltyService.js';
 
 // Нормализация статуса к БД
 function normalizeTaskStatus(s) {
@@ -181,6 +184,26 @@ export class BotApp {
     process.env.TZ = process.env.TZ || 'Asia/Dushanbe';
     startDirectorHourlyReportScheduler({ api: this.api, toolRouter: this.tools, notifier: this.notifier, explanatoryService: this.explanatory });
     startAssigneeReminderScheduler5min({ api: this.api, toolRouter: this.tools, notifier: this.notifier });
+    
+    // 🚨 Мониторинг просроченных объяснительных (каждые 10 минут)
+    startExplanationTimeoutService({ 
+      toolRouter: this.tools, 
+      notifier: this.notifier, 
+      explanatoryService: this.explanatory 
+    });
+    
+    // 📝 Автоматическое обновление статуса просроченных задач (каждые 10 минут)
+    startTaskStatusUpdater({ 
+      toolRouter: this.tools, 
+      notifier: this.notifier, 
+      api: this.api 
+    });
+    
+    // 💰 Мониторинг бонусов и лишение за 3+ объяснительных в месяц (каждые 6 часов)
+    startBonusPenaltyService({ 
+      toolRouter: this.tools, 
+      notifier: this.notifier 
+    });
   }
 
   bindHandlers() {
@@ -397,6 +420,54 @@ export class BotApp {
       } catch (error) {
         log.error('[BotApp] Ошибка наказания:', error.message);
         await this.bot.sendMessage(msg.chat.id, '❌ Произошла ошибка при наложении наказания.');
+      }
+    });
+
+    // Команда для лишения бонуса (3+ объяснительных в месяц)
+    this.bot.onText(/^\/penalty_bonus\s+(\d+)\s+(\d+)\s+(.+)$/, async (msg, match) => {
+      const auth = await this.acl.authorize(msg.from?.id);
+      if (!auth.allowed || auth.employee.user_role !== 'manager') {
+        await this.bot.sendMessage(msg.chat.id, '❌ Доступ запрещен.');
+        return;
+      }
+
+      const employeeId = Number(match[1]);
+      const bonusAmount = Number(match[2]);
+      const comment = match[3];
+
+      try {
+        // Получаем информацию о сотруднике
+        const employees = await this.api.get('employees');
+        const employee = employees.find(emp => emp.employee_id === employeeId);
+        
+        if (!employee) {
+          await this.bot.sendMessage(msg.chat.id, '❌ Сотрудник не найден');
+          return;
+        }
+
+        log.info(`[BotApp] Лишение бонуса: ${employee.name}, сумма: ${bonusAmount}, причина: ${comment}`);
+
+        await this.bot.sendMessage(msg.chat.id, 
+          `💰 БОНУС ЛИШЕН\n\n` +
+          `Сотрудник: ${employee.name}\n` +
+          `Сумма: ${bonusAmount} сом\n` +
+          `Причина: ${comment}\n` +
+          `Дата: ${new Date().toLocaleString('ru-RU')}`
+        );
+
+        // Уведомляем сотрудника
+        if (employee.chat_id) {
+          await this.bot.sendMessage(employee.chat_id,
+            `💰 УВЕДОМЛЕНИЕ О ЛИШЕНИИ БОНУСА\n\n` +
+            `Вам лишен бонус в размере ${bonusAmount} сом\n` +
+            `Причина: ${comment}\n` +
+            `Дата: ${new Date().toLocaleString('ru-RU')}`
+          );
+        }
+
+      } catch (error) {
+        log.error('[BotApp] Ошибка лишения бонуса:', error.message);
+        await this.bot.sendMessage(msg.chat.id, '❌ Произошла ошибка при лишении бонуса');
       }
     });
 
@@ -681,6 +752,94 @@ export class BotApp {
 
       const data = q.data || '';
 
+      // Обработка обычных кнопок для всех сотрудников
+      if (data === 'new_task') {
+        const result = '➕ Для создания новой задачи используйте команду:\n/create_task [название задачи] [описание] [приоритет] [дедлайн]\n\nПример:\n/create_task Разработать API Высокий 2024-01-15';
+        await this.bot.answerCallbackQuery(q.id, { text: 'Инструкция отправлена' });
+        await this.bot.sendMessage(q.from.id, result);
+        return;
+      }
+      
+      if (data === 'update_status') {
+        const result = '🔄 Для обновления статуса задачи используйте команду:\n/update_task [ID_задачи] [новый_статус]\n\nПример:\n/update_task 123 В работе';
+        await this.bot.answerCallbackQuery(q.id, { text: 'Инструкция отправлена' });
+        await this.bot.sendMessage(q.from.id, result);
+        return;
+      }
+      
+      if (data === 'employees') {
+        try {
+          const empResult = await this.tools.route('list_employees', {}, {
+            requesterChatId: String(q.from.id),
+            requesterEmployee: auth.employee
+          });
+          if (empResult.ok && empResult.employees && empResult.employees.length > 0) {
+            let result = '👥 СПИСОК СОТРУДНИКОВ:\n\n';
+            for (const emp of empResult.employees) {
+              result += `👤 ${emp.name}\n`;
+              result += `💼 Должность: ${emp.job || emp.position || 'Не указана'}\n`;
+              result += `📱 Chat ID: ${emp.chat_id || emp.tg_user_id || 'Не указан'}\n`;
+              result += `🔑 Роль: ${emp.user_role || 'Не указана'}\n`;
+              result += `\n${'─'.repeat(30)}\n\n`;
+            }
+            await this.bot.answerCallbackQuery(q.id, { text: 'Список сотрудников отправлен' });
+            await this.bot.sendMessage(q.from.id, result);
+          } else {
+            await this.bot.answerCallbackQuery(q.id, { text: 'Не удалось получить список сотрудников' });
+          }
+        } catch (error) {
+          await this.bot.answerCallbackQuery(q.id, { text: 'Ошибка получения списка сотрудников' });
+        }
+        return;
+      }
+      
+      if (data === 'report') {
+        try {
+          const reportResult = await this.tools.route('get_report', {}, {
+            requesterChatId: String(q.from.id),
+            requesterEmployee: auth.employee
+          });
+          if (reportResult.ok) {
+            const result = reportResult.report || '📊 Отчет готов';
+            await this.bot.answerCallbackQuery(q.id, { text: 'Отчет отправлен' });
+            await this.bot.sendMessage(q.from.id, result);
+          } else {
+            await this.bot.answerCallbackQuery(q.id, { text: 'Не удалось получить отчет' });
+          }
+        } catch (error) {
+          await this.bot.answerCallbackQuery(q.id, { text: 'Ошибка получения отчета' });
+        }
+        return;
+      }
+      
+      if (data === 'explanations') {
+        try {
+          const expResult = await this.tools.route('list_pending_explanations', { limit: 10 }, {
+            requesterChatId: String(q.from.id),
+            requesterEmployee: auth.employee
+          });
+          if (expResult.ok && expResult.explanations && expResult.explanations.length > 0) {
+            let result = '📝 ОЖИДАЮЩИЕ РАССМОТРЕНИЯ ОБЪЯСНИТЕЛЬНЫЕ:\n\n';
+            for (const exp of expResult.explanations) {
+              result += `🆔 ID: ${exp.id}\n`;
+              result += `📋 Задача: ${exp.task}\n`;
+              result += `👤 Сотрудник: ${exp.employee_name}\n`;
+              result += `📝 Объяснение: ${exp.explanation_text}\n`;
+              result += `📅 Дата: ${new Date(exp.responded_at).toLocaleString('ru-RU')}\n`;
+              result += `⏰ Статус: Ожидает рассмотрения\n`;
+              result += `\n${'─'.repeat(40)}\n\n`;
+            }
+            await this.bot.answerCallbackQuery(q.id, { text: 'Список объяснительных отправлен' });
+            await this.bot.sendMessage(q.from.id, result);
+          } else {
+            await this.bot.answerCallbackQuery(q.id, { text: 'Нет ожидающих объяснительных' });
+          }
+        } catch (error) {
+          await this.bot.answerCallbackQuery(q.id, { text: 'Ошибка получения объяснительных' });
+        }
+        return;
+      }
+
       // Обработка кнопок руководства
       if (data.startsWith('leadership_')) {
         if (auth.employee.user_role !== 'manager') {
@@ -711,18 +870,26 @@ export class BotApp {
               result = await leadership.autoDecideOnTasks();
               break;
             case 'leadership_explanations':
+            case 'explanations':
               const expResult = await this.tools.route('list_pending_explanations', { limit: 10 }, {
                 requesterChatId: String(q.from.id),
                 requesterEmployee: auth.employee
               });
               if (expResult.ok && expResult.explanations.length > 0) {
-                result = '📝 Ожидающие рассмотрения объяснительные:\n\n';
+                result = '📝 ОЖИДАЮЩИЕ РАССМОТРЕНИЯ ОБЪЯСНИТЕЛЬНЫЕ:\n\n';
                 for (const exp of expResult.explanations) {
-                  result += `ID: ${exp.id}\n`;
-                  result += `Задача: ${exp.task}\n`;
-                  result += `Сотрудник: ${exp.employee_name}\n`;
-                  result += `Объяснение: ${exp.explanation_text}\n\n`;
+                  result += `🆔 ID: ${exp.id}\n`;
+                  result += `📋 Задача: ${exp.task}\n`;
+                  result += `👤 Сотрудник: ${exp.employee_name}\n`;
+                  result += `📝 Объяснение: ${exp.explanation_text}\n`;
+                  result += `📅 Дата: ${new Date(exp.responded_at).toLocaleString('ru-RU')}\n`;
+                  result += `⏰ Статус: Ожидает рассмотрения\n`;
+                  result += `\n${'─'.repeat(40)}\n\n`;
                 }
+                result += `\n💡 Используйте команды для рассмотрения:\n`;
+                result += `/accept [ID] [комментарий] - принять\n`;
+                result += `/reject [ID] [комментарий] - отклонить\n`;
+                result += `/penalty [ID] [сумма] [комментарий] - штраф`;
               } else {
                 result = '✅ Нет ожидающих объяснительных';
               }
@@ -810,6 +977,25 @@ export class BotApp {
           log.error('[BotApp] Ошибка выполнения команды руководства:', error.message);
           await this.bot.answerCallbackQuery(q.id, { text: 'Ошибка выполнения команды' });
         }
+        return;
+      }
+
+      // Обработка кнопок объяснительных
+      if (q.data.startsWith('accept_exp_') || q.data.startsWith('reject_exp_') || q.data.startsWith('penalty_exp_')) {
+        const action = q.data.split('_')[0]; // accept, reject, penalty
+        const expId = q.data.split('_')[2]; // ID объяснительной
+        
+        let result = '';
+        if (action === 'accept') {
+          result = `✅ Объяснительная ${expId} принята автоматически.\n\nДля добавления комментария используйте команду:\n/accept ${expId} [ваш комментарий]`;
+        } else if (action === 'reject') {
+          result = `❌ Объяснительная ${expId} отклонена автоматически.\n\nДля добавления комментария используйте команду:\n/reject ${expId} [ваш комментарий]`;
+        } else if (action === 'penalty') {
+          result = `💰 Для наложения штрафа по объяснительной ${expId} используйте команду:\n/penalty ${expId} [сумма] [комментарий]`;
+        }
+        
+        await this.bot.sendMessage(q.message.chat.id, result);
+        await this.bot.answerCallbackQuery(q.id, { text: 'Действие выполнено' });
         return;
       }
 

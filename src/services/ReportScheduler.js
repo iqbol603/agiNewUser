@@ -813,7 +813,38 @@ function createOverdueDiagram(overdueTasks, employeesById) {
 }
 
 /**
+ * Проверяет, является ли сотрудник директором или помощницей
+ */
+function isDirectorOrAssistant(employee) {
+  if (!employee) return false;
+  
+  const job = String(employee.job || employee.position || '').toLowerCase();
+  const name = String(employee.name || '').toLowerCase();
+  const userRole = String(employee.user_role || '').toLowerCase();
+  
+  // Проверяем по должности
+  if (/директор|руководитель|начальник|заместитель|помощник|помощница/.test(job)) {
+    return true;
+  }
+  
+  // Проверяем по имени (известные директора и помощницы)
+  if (name.includes('муминов') || name.includes('бахтиёр') || 
+      name.includes('химматова') || name.includes('нигора') ||
+      name.includes('боймирзоева') || name.includes('нозима')) {
+    return true;
+  }
+  
+  // Проверяем по роли (если есть)
+  if (userRole === 'manager' && /помощник|помощница/.test(job)) {
+    return true;
+  }
+  
+  return false;
+}
+
+/**
  * Запрашивает объяснительные у сотрудников с просроченными задачами
+ * ИСКЛЮЧАЕТ директоров и помощниц
  */
 async function requestExplanationsForOverdueTasks(overdueTasks, employeesById, explanatoryService) {
   const requests = [];
@@ -824,6 +855,12 @@ async function requestExplanationsForOverdueTasks(overdueTasks, employeesById, e
     
     const emp = employeesById.get(empId);
     if (!emp || !emp.chat_id) continue;
+
+    // ИСКЛЮЧАЕМ директоров и помощниц
+    if (isDirectorOrAssistant(emp)) {
+      console.log(`[ReportScheduler] Пропускаем директора/помощницу: ${emp.name} (${emp.job || emp.position})`);
+      continue;
+    }
 
     try {
       const explanationId = await explanatoryService.requestExplanation(
@@ -1069,6 +1106,7 @@ function buildAssigneeReminderText(emp, tasks) {
 
 /**
  * Группирует активные задачи по сотрудникам (без завершённых/отменённых)
+ * ИСКЛЮЧАЕТ директоров и помощниц
  */
 function groupOpenTasksByEmployee(tasks, employees) {
   const employeesById = new Map((employees || []).map(e => [String(e.employee_id || e.id), e]));
@@ -1079,7 +1117,19 @@ function groupOpenTasksByEmployee(tasks, employees) {
     if (!map.has(eid)) map.set(eid, []);
     map.get(eid).push(t);
   }
-  return { buckets: map, employeesById };
+  
+  // Фильтруем директоров и помощниц
+  const filteredMap = new Map();
+  for (const [eid, taskList] of map.entries()) {
+    const emp = employeesById.get(String(eid));
+    if (emp && !isDirectorOrAssistant(emp)) {
+      filteredMap.set(eid, taskList);
+    } else if (emp) {
+      console.log(`[ReportScheduler] Пропускаем директора/помощницу в напоминаниях: ${emp.name} (${emp.job || emp.position})`);
+    }
+  }
+  
+  return { buckets: filteredMap, employeesById };
 }
 
 /**
