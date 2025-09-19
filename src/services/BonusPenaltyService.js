@@ -65,11 +65,11 @@ export class BonusPenaltyService {
           e.job as employee_job,
           e.chat_id as employee_chat_id,
           COUNT(*) as explanation_count,
-          GROUP_CONCAT(ee.task ORDER BY ee.requested_at DESC) as tasks
+          GROUP_CONCAT(ee.task_id ORDER BY ee.requested_at DESC) as tasks
         FROM employee_explanations ee
         LEFT JOIN employees e ON ee.employee_id = e.employee_id
         WHERE ee.requested_at >= ? 
-          AND ee.status IN ('accepted', 'rejected', 'penalty')
+          AND ee.status IN ('accepted', 'rejected', 'bonus_penalty')
         GROUP BY ee.employee_id, e.name, e.job, e.chat_id
         HAVING explanation_count >= 3
         ORDER BY explanation_count DESC

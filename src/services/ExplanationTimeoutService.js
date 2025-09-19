@@ -65,9 +65,11 @@ export class ExplanationTimeoutService {
           ee.requested_at,
           e.name as employee_name,
           e.chat_id as employee_chat_id,
-          e.job as employee_job
+          e.job as employee_job,
+          t.task as task_title
         FROM employee_explanations ee
         LEFT JOIN employees e ON ee.employee_id = e.employee_id
+        LEFT JOIN tasks t ON ee.task_id = t.task_id
         WHERE ee.status = 'pending' 
           AND ee.requested_at < ?
         ORDER BY ee.requested_at ASC
@@ -99,18 +101,11 @@ export class ExplanationTimeoutService {
       // Отправляем уведомления директору
       await this.notifyDirectorAboutOverdueExplanations(overdueByEmployee);
 
-      // Обновляем статус объяснительных на "overdue"
-      const explanationIds = (Array.isArray(rows) ? rows : []).map(row => row.id);
-      if (explanationIds.length > 0) {
-        await query(`
-          UPDATE employee_explanations 
-          SET status = 'overdue', 
-              updated_at = NOW() 
-          WHERE id IN (${explanationIds.map(() => '?').join(',')})
-        `, explanationIds);
-        
-        log.info(`[ExplanationTimeoutService] Обновлен статус ${explanationIds.length} объяснительных на 'overdue'`);
-      }
+        // Логируем просроченные объяснительные (оставляем статус 'pending')
+        const explanationIds = (Array.isArray(rows) ? rows : []).map(row => row.id);
+        if (explanationIds.length > 0) {
+          log.info(`[ExplanationTimeoutService] Найдено ${explanationIds.length} просроченных объяснительных (статус остается 'pending')`);
+        }
 
     } catch (error) {
       log.error('[ExplanationTimeoutService] Ошибка проверки просроченных объяснительных:', error.message);
@@ -177,7 +172,7 @@ export class ExplanationTimeoutService {
           AND chat_id != ''
       `);
 
-      return rows.map(row => row.chat_id).filter(Boolean);
+      return Array.isArray(rows) ? rows.map(row => row.chat_id).filter(Boolean) : [rows.chat_id].filter(Boolean);
     } catch (error) {
       log.error('[ExplanationTimeoutService] Ошибка получения директоров:', error.message);
       return [];
@@ -210,7 +205,8 @@ export class ExplanationTimeoutService {
       const tasksToShow = explanations.slice(0, 3);
       for (const exp of tasksToShow) {
         const requestedTime = new Date(exp.requested_at).toLocaleString('ru-RU');
-        message += `   • #${exp.task_id} (запрошено: ${requestedTime})\n`;
+        message += `   • Задача #${exp.task_id}: "${exp.task_title || 'Название не указано'}"\n`;
+        message += `     Запрошено: ${requestedTime}\n`;
       }
       
       if (explanations.length > 3) {
@@ -220,11 +216,15 @@ export class ExplanationTimeoutService {
       message += `\n`;
     }
 
-    message += `💡 РЕКОМЕНДАЦИИ:\n`;
-    message += `• Связаться с сотрудниками напрямую\n`;
-    message += `• Рассмотреть дисциплинарные меры\n`;
-    message += `• Проверить загруженность сотрудников\n`;
+    message += `🔧 ДЕЙСТВИЯ ДЛЯ ДИРЕКТОРА:\n`;
+    for (const [empId, data] of Object.entries(overdueByEmployee)) {
+      const { employee } = data;
+      message += `• Дать дополнительный час ${employee.name}: /give_extra_hour ${empId}\n`;
+      message += `• Лишить бонуса ${employee.name}: /penalty_bonus ${empId} [сумма] [причина]\n`;
+    }
+    message += `\n💡 ДОПОЛНИТЕЛЬНО:\n`;
     message += `• Использовать команду /explanations для просмотра всех объяснительных\n`;
+    message += `• Связаться с сотрудниками напрямую\n`;
 
     return message;
   }

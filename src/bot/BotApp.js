@@ -325,6 +325,76 @@ export class BotApp {
       }
     });
 
+    // Обновление задачи (только для менеджеров/директоров)
+    // Формат: /update_task <id> [title="..."] [desc="..."] [deadline="..."] [priority=...] [assignee="ФИО"]
+    this.bot.onText(/^\/update_task\s+(\d+)(.*)$/i, async (msg, match) => {
+      const auth = await this.acl.authorize(msg.from?.id);
+      if (!auth.allowed || auth.employee.user_role !== 'manager') {
+        await this.bot.sendMessage(msg.chat.id, '❌ Доступ запрещен. Только руководители могут обновлять задачи.');
+        return;
+      }
+
+      const taskId = Number(match[1]);
+      const rest = match[2] || '';
+
+      // Примитивный парсер аргументов вида key="value" key=value
+      const args = {};
+      const regexKV = /(title|desc|deadline|priority|assignee)\s*=\s*("([^"]*)"|([^\s]+))/gi;
+      let m;
+      while ((m = regexKV.exec(rest)) !== null) {
+        const key = m[1];
+        const val = (m[3] ?? m[4] ?? '').trim();
+        args[key] = val;
+      }
+
+      // Мэппинг аргументов
+      const payload = { taskId };
+      if (args.title) payload.title = args.title;
+      if (args.desc) payload.desc = args.desc;
+      if (args.deadline) payload.deadline = args.deadline;
+      if (args.priority) payload.priority = args.priority;
+      if (args.assignee) payload.assigneeName = args.assignee;
+
+      try {
+        const res = await this.tools.route('update_task', payload, {
+          requesterChatId: String(msg.chat.id),
+          requesterEmployee: auth.employee
+        });
+        if (res.ok) {
+          await this.bot.sendMessage(msg.chat.id, `✅ Задача #${taskId} обновлена.`);
+        } else {
+          await this.bot.sendMessage(msg.chat.id, `❌ Ошибка: ${res.error}`);
+        }
+      } catch (e) {
+        await this.bot.sendMessage(msg.chat.id, `❌ Ошибка обновления задачи: ${e?.message || e}`);
+      }
+    });
+
+    // Установить дедлайн (менеджер/директор)
+    // Пример: /set_deadline 3 "через 10 минут"
+    this.bot.onText(/^\/set_deadline\s+(\d+)\s+(.+)$/i, async (msg, match) => {
+      const auth = await this.acl.authorize(msg.from?.id);
+      if (!auth.allowed || auth.employee.user_role !== 'manager') {
+        await this.bot.sendMessage(msg.chat.id, '❌ Доступ запрещен. Только руководители могут менять дедлайны.');
+        return;
+      }
+      const taskId = Number(match[1]);
+      const deadline = match[2].trim();
+      try {
+        const res = await this.tools.route('set_deadline', { taskId, deadline }, {
+          requesterChatId: String(msg.chat.id),
+          requesterEmployee: auth.employee
+        });
+        if (res.ok) {
+          await this.bot.sendMessage(msg.chat.id, `✅ Дедлайн задачи #${taskId} обновлен на: ${res.deadline}`);
+        } else {
+          await this.bot.sendMessage(msg.chat.id, `❌ Ошибка: ${res.error}`);
+        }
+      } catch (e) {
+        await this.bot.sendMessage(msg.chat.id, `❌ Ошибка изменения дедлайна: ${e?.message || e}`);
+      }
+    });
+
     // Команда для принятия объяснительной
     this.bot.onText(/^\/accept\s+(\d+)\s+(.+)$/, async (msg, match) => {
       const auth = await this.acl.authorize(msg.from?.id);
@@ -465,9 +535,76 @@ export class BotApp {
           );
         }
 
+        // Уведомляем всех сотрудников о лишении бонуса
+        try {
+          const allEmployees = await this.api.get('employees');
+          const notificationMessage = `🚨 УВЕДОМЛЕНИЕ ВСЕМ СОТРУДНИКАМ\n\n` +
+            `Сотрудник ${employee.name} лишен бонуса в размере ${bonusAmount} сом\n` +
+            `Причина: ${comment}\n` +
+            `Дата: ${new Date().toLocaleString('ru-RU')}\n\n` +
+            `Это уведомление отправлено для поддержания дисциплины в команде.`;
+
+          for (const emp of allEmployees) {
+            if (emp.chat_id && emp.employee_id !== employeeId) {
+              try {
+                await this.bot.sendMessage(emp.chat_id, notificationMessage);
+              } catch (notifyError) {
+                log.warn(`[BotApp] Не удалось уведомить сотрудника ${emp.name}:`, notifyError.message);
+              }
+            }
+          }
+        } catch (notifyAllError) {
+          log.error('[BotApp] Ошибка уведомления всех сотрудников:', notifyAllError.message);
+        }
+
       } catch (error) {
         log.error('[BotApp] Ошибка лишения бонуса:', error.message);
         await this.bot.sendMessage(msg.chat.id, '❌ Произошла ошибка при лишении бонуса');
+      }
+    });
+
+    // Команда для предоставления дополнительного часа на объяснительную
+    this.bot.onText(/^\/give_extra_hour\s+(\d+)$/, async (msg, match) => {
+      const auth = await this.acl.authorize(msg.from?.id);
+      if (!auth.allowed || auth.employee.user_role !== 'manager') {
+        await this.bot.sendMessage(msg.chat.id, '❌ Доступ запрещен. Только менеджеры могут давать дополнительное время.');
+        return;
+      }
+
+      const employeeId = match[1];
+      
+      try {
+        // Обновляем время запроса объяснительных для этого сотрудника на текущее время
+        const { query } = await import('../config/db.js');
+        await query(`
+          UPDATE employee_explanations 
+          SET requested_at = NOW() 
+          WHERE employee_id = ? AND status = 'pending'
+        `, [employeeId]);
+
+        // Получаем информацию о сотруднике
+        const [employeeRows] = await query(`
+          SELECT name, chat_id FROM employees WHERE employee_id = ?
+        `, [employeeId]);
+
+        if (employeeRows && employeeRows.chat_id) {
+          // Уведомляем сотрудника
+          await this.notifier.sendText(
+            employeeRows.chat_id,
+            `⏰ ВАМ ПРЕДОСТАВЛЕНО ДОПОЛНИТЕЛЬНОЕ ВРЕМЯ\n\n` +
+            `Директор дал вам дополнительный час для предоставления объяснительных.\n` +
+            `Пожалуйста, отправьте объяснительные в течение часа.\n\n` +
+            `Используйте команду: /explanation [ID_задачи] [ваше_объяснение]`
+          );
+        }
+
+        await this.bot.sendMessage(
+          msg.chat.id,
+          `✅ Сотруднику ${employeeRows?.name || 'ID: ' + employeeId} предоставлен дополнительный час для объяснительных`
+        );
+      } catch (error) {
+        log.error('[BotApp] Ошибка предоставления дополнительного времени:', error.message);
+        await this.bot.sendMessage(msg.chat.id, '❌ Произошла ошибка при предоставлении дополнительного времени');
       }
     });
 

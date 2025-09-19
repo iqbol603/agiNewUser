@@ -22,11 +22,45 @@ export function parseHumanDateRu(input, now = new Date()) {
 
 	let base = new Date(now);
 	let dayShift = 0;
-	console.log("date",base);
 
-	if (/\bпослезавтра\b/.test(s)) dayShift = 2;
-	else if (/\bзавтра\b/.test(s)) dayShift = 1;
-	else if (/\bсегодня\b/.test(s)) dayShift = 0;
+	if (/(^|\s)послезавтра(\s|$)/.test(s)) dayShift = 2;
+	else if (/(^|\s)завтра(\s|$)/.test(s)) dayShift = 1;
+	else if (/(^|\s)сегодня(\s|$)/.test(s)) dayShift = 0;
+    
+    // относительные сдвиги времени: "через X минут/часов/дней"
+	const throughTimeMatch = s.match(/(^|\s)через\s+(\d+)\s*(минут(?:у|ы)?|мин|час(?:а|ов)?|ч|дн(?:я|ей)?|день|дней)(\s|$)/);
+    if (throughTimeMatch) {
+		const value = parseInt(throughTimeMatch[2]);
+		const unit = throughTimeMatch[3];
+        const d = new Date(base);
+        if (/^мин/.test(unit)) {
+            d.setMinutes(d.getMinutes() + value);
+            return d;
+        }
+        if (/^(час|ч)/.test(unit)) {
+            d.setHours(d.getHours() + value);
+            return d;
+        }
+        if (/^(дн|день|дней)/.test(unit)) {
+            d.setDate(d.getDate() + value);
+            return d;
+        }
+    }
+
+    // "на час", "на 2 часа", "на 30 минут"
+	const onTimeMatch = s.match(/(^|\s)на\s+(\d+)?\s*(минут(?:у|ы)?|мин|час(?:а|ов)?|ч)(\s|$)/);
+    if (onTimeMatch) {
+		const rawVal = onTimeMatch[2];
+        const value = rawVal ? parseInt(rawVal) : 1;
+		const unit = onTimeMatch[3];
+        const d = new Date(base);
+        if (/^мин/.test(unit)) {
+            d.setMinutes(d.getMinutes() + value);
+            return d;
+        }
+        d.setHours(d.getHours() + value);
+        return d;
+    }
 	
 	// Добавляем поддержку "через X дней"
 	const throughMatch = s.match(/\bчерез\s+(\d+)\s+дн(?:я|ей)?\b/);

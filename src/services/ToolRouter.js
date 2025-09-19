@@ -10,8 +10,20 @@ import { deadlineValidator } from './DeadlineValidator.js';
 
 const norm = (s) => String(s || '').trim().toLowerCase();
 
-const mapTaskRow = (t, employeesById = new Map()) => {
+function isDirectorOrAssistant(employee) {
+  if (!employee) return false;
+  const job = String(employee.job || employee.position || '').toLowerCase();
+  const name = String(employee.name || '').toLowerCase();
+  const userRole = String(employee.user_role || '').toLowerCase();
+  if (/директор|руководитель|начальник|заместитель|помощник|помощница/.test(job)) return true;
+  if (name.includes('муминов') || name.includes('бахтиёр') || name.includes('химматова') || name.includes('нигора') || name.includes('боймирзоева') || name.includes('нозима')) return true;
+  if (userRole === 'manager' && /помощник|помощница/.test(job)) return true;
+  return false;
+}
+
+const mapTaskRow = (t, employeesById = new Map(), assignersByTaskId = new Map()) => {
 	const emp = employeesById.get(t.employee_id) || null;
+	const assigner = assignersByTaskId.get(t.task_id) || null;
 	return {
 		id: t.task_id, // В локальной БД поле называется task_id
 		task: t.task,
@@ -20,7 +32,8 @@ const mapTaskRow = (t, employeesById = new Map()) => {
 		deadline: t.deadline || null,
 		status: t.status || null,
 		priority: t.prioritet || t.priority || null,
-		chat_id: emp?.chat_id || null
+		chat_id: emp?.chat_id || null,
+		assigned_by: assigner?.name || null
 	};
 };
 
@@ -40,6 +53,41 @@ export const TOOL_SCHEMAS = [
           priority: { type: 'string', enum: ['Критический','Высокий','Средний','Низкий','Очень низкий'] }
         },
         required: ['title','assigneeName']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'set_deadline',
+      description: 'Установить дедлайн задачи (менеджер/директор)',
+      parameters: {
+        type: 'object',
+        properties: {
+          taskId: { type: 'number' },
+          deadline: { type: 'string', description: 'Относительное или абсолютное время (на 2 часа, через 10 минут, 2025-09-20 17:00)' }
+        },
+        required: ['taskId','deadline']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'update_task',
+      description: 'Обновить данные задачи (только для менеджера/директора)',
+      parameters: {
+        type: 'object',
+        properties: {
+          taskId: { type: 'number' },
+          title: { type: 'string' },
+          desc: { type: 'string' },
+          deadline: { type: 'string' },
+          priority: { type: 'string' },
+          assigneeName: { type: 'string' },
+          employee_id: { type: 'number' }
+        },
+        required: ['taskId']
       }
     }
   },
@@ -307,10 +355,20 @@ export class ToolRouter {
         log.info(`[ToolRouter] Найденный сотрудник:`, JSON.stringify(assignee, null, 2));
         log.info(`[ToolRouter] employee_id для API:`, employee_id);
 
+        // Блокируем назначение задач директору и помощницам
+        if (assignee && isDirectorOrAssistant(assignee)) {
+          return { ok: false, error: 'Назначение задач директору и его помощникам запрещено' };
+        }
+
         let deadline = String(A.deadline || '').trim();
         
-        // Валидируем дедлайн, если он указан
-        if (deadline) {
+        // Роль запрашивающего
+        const requester = ctx?.requesterEmployee || null;
+        const requesterRole = (requester && String(requester.user_role || '').toLowerCase()) || 'staff';
+        const isDirector = requesterRole === 'manager' || /директор|стратегическому развитию/i.test(String(requester?.job || ''));
+
+        // Валидируем дедлайн, если он указан (кроме руководителей/директоров)
+        if (deadline && !isDirector) {
           const validation = deadlineValidator.validateDeadline(
             A.title, 
             A.desc, 
@@ -420,11 +478,7 @@ export class ToolRouter {
           }
         }
         
-        // Если парсинг не удался и дата содержит относительные слова, очищаем её
-        if (deadline && /через|завтра|послезавтра|сегодня|вчера|позавчера/.test(deadline)) {
-          log.warn(`[ToolRouter] Дата содержит относительные слова, очищаем: "${deadline}"`);
-          deadline = '';
-        }
+        // Относительные даты теперь переводим в абсолютные; не очищаем
         
         // бэкенд нормализует даты, как у вас задумано
 
@@ -453,7 +507,7 @@ export class ToolRouter {
 
         log.info(`[ToolRouter] Задача создана через внешний API с ID: ${externalTaskId}`);
 
-        // 2. Синхронизируем с локальной БД для отображения в list_tasks
+        // 2. Синхронизируем с локальной БД для отображения в list_tasks и сохраняем назначившего
         try {
           await query(`
             INSERT INTO tasks (task_id, task, employee_id, description, deadline, status, prioritet, created_at) 
@@ -467,6 +521,18 @@ export class ToolRouter {
             prioritet = VALUES(prioritet)
           `, [externalTaskId, payload.task, payload.employee_id, payload.description, payload.deadline, payload.status, payload.prioritet]);
           
+          await query(`CREATE TABLE IF NOT EXISTS task_assigners (
+            task_id BIGINT PRIMARY KEY,
+            assigner_employee_id BIGINT NULL,
+            assigned_at DATETIME DEFAULT CURRENT_TIMESTAMP
+          ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+
+          if (requester?.employee_id || requester?.id) {
+            const assignerId = requester.employee_id || requester.id;
+            await query(`INSERT INTO task_assigners (task_id, assigner_employee_id) VALUES (?, ?) 
+              ON DUPLICATE KEY UPDATE assigner_employee_id = VALUES(assigner_employee_id)`, [externalTaskId, assignerId]);
+          }
+
           log.info(`[ToolRouter] Задача синхронизирована с локальной БД, ID: ${externalTaskId}`);
         } catch (dbError) {
           log.error('[ToolRouter] Ошибка синхронизации с локальной БД:', dbError.message);
@@ -560,6 +626,20 @@ export class ToolRouter {
           log.error('[ToolRouter] Ошибка синхронизации статуса с локальной БД:', dbError.message);
         }
         
+        // 2.1 Уведомляем назначившего (директора/руководителя), если он есть в task_assigners
+        try {
+          const [rows] = await query('SELECT ta.assigner_employee_id, e.chat_id, e.name FROM task_assigners ta LEFT JOIN employees e ON e.employee_id = ta.assigner_employee_id WHERE ta.task_id = ?', [id]);
+          const assigner = Array.isArray(rows) ? rows[0] : rows;
+          if (assigner?.chat_id && this.notifier) {
+            log.info(`[ToolRouter] Отправляем уведомление назначившему ${assigner.name} (${assigner.chat_id}) о смене статуса задачи ${id} на ${newStatus}`);
+            await this.notifier.sendText(assigner.chat_id, `ℹ️ Статус задачи #${id} обновлен на: ${newStatus}`);
+          } else {
+            log.warn(`[ToolRouter] Не удалось найти назначившего для задачи ${id} или у него нет chat_id`);
+          }
+        } catch (notifyErr) {
+          log.warn('[ToolRouter] Не удалось уведомить назначившего о смене статуса:', notifyErr.message);
+        }
+
         // 3. Если задача закрывается - создаем финальный отчет
         if (isClosing) {
           try {
@@ -643,11 +723,21 @@ export class ToolRouter {
 
         // справочник сотрудников
         const byId = new Map(emps.map(e => [e.employee_id || e.id, e]));
-        const tasks = (Array.isArray(rows) ? rows : []).map(r => mapTaskRow(r, byId));
+        // Подтягиваем назначивших по task_assigners
+        let assignersByTaskId = new Map();
+        try {
+          const ids = (rows || []).map(r => r.task_id);
+          if (ids.length) {
+            const placeholders = ids.map(() => '?').join(',');
+            const [assignRows] = await query(`SELECT ta.task_id, e.name FROM task_assigners ta LEFT JOIN employees e ON e.employee_id = ta.assigner_employee_id WHERE ta.task_id IN (${placeholders})`, ids);
+            assignersByTaskId = new Map(assignRows.map(r => [r.task_id, { name: r.name }]));
+          }
+        } catch {}
+        const tasks = (Array.isArray(rows) ? rows : []).map(r => mapTaskRow(r, byId, assignersByTaskId));
 
         // удобные строки для мгновенного вывода с ID
         const tasks_pretty = tasks.map(t =>
-          `#${t.id} — ${t.task} | Исп.: ${t.assignee} | Дедлайн: ${t.deadline ?? '—'} | Статус: ${t.status ?? '—'} | Приоритет: ${t.priority ?? '—'}`
+          `#${t.id} — ${t.task} | Исп.: ${t.assignee} | Назначил: ${t.assigned_by ?? '—'} | Дедлайн: ${t.deadline ?? '—'} | Статус: ${t.status ?? '—'} | Приоритет: ${t.priority ?? '—'}`
         );
 
         return { ok: true, tasks, tasks_pretty };
@@ -738,6 +828,11 @@ export class ToolRouter {
         if (!newEmployeeId) return { ok: false, error: 'EMPLOYEE_ID_NOT_FOUND' };
       } else {
         return { ok: false, error: 'BAD_PARAMS: provide assigneeName or employee_id' };
+      }
+
+      // Блокируем переназначение задач директору и помощницам
+      if (newAssignee && isDirectorOrAssistant(newAssignee)) {
+        return { ok: false, error: 'Переназначение задач директору и его помощникам запрещено' };
       }
 
       // Текущая задача
@@ -1011,6 +1106,90 @@ export class ToolRouter {
         return { ok: true, explanations: list };
       } catch (error) {
         log.error('[ToolRouter] Ошибка получения собственных объяснительных:', error.message);
+        return { ok: false, error: error.message };
+      }
+    }
+
+    // ---- UPDATE TASK (admin) ----
+    if (name === 'update_task') {
+      try {
+        const requester = ctx?.requesterEmployee || null;
+        const requesterRole = (requester && String(requester.user_role || '').toLowerCase()) || 'staff';
+        const isDirector = requesterRole === 'manager' || /директор|стратегическому развитию/i.test(String(requester?.job || ''));
+        if (!isDirector) {
+          return { ok: false, error: 'Недостаточно прав для обновления задачи' };
+        }
+
+        const id = Number(A.taskId);
+        if (!Number.isFinite(id) || id <= 0) return { ok: false, error: 'Некорректный ID задачи' };
+
+        const changes = {};
+        if (typeof A.title === 'string') changes.task = String(A.title).trim();
+        if (typeof A.desc === 'string') changes.description = String(A.desc).trim();
+        if (typeof A.priority === 'string') changes.prioritet = String(A.priority).trim();
+        let deadline = typeof A.deadline === 'string' ? String(A.deadline).trim() : '';
+        if (deadline) {
+          try {
+            const parsed = parseHumanDateRu(deadline, new Date());
+            if (parsed) deadline = toDbDateTime(parsed);
+          } catch {}
+          changes.deadline = deadline;
+        }
+
+        if (A.employee_id || A.assigneeName) {
+          let newEmployeeId = Number(A.employee_id || 0) || null;
+          if (!newEmployeeId && A.assigneeName) {
+            const { match } = await this.employees.resolveByName(A.assigneeName);
+            newEmployeeId = match?.employee_id || match?.id || null;
+          }
+          if (newEmployeeId) changes.employee_id = newEmployeeId;
+        }
+
+        const updated = await this.api.update('tasks', String(id), changes);
+
+        const fields = [];
+        const params = [];
+        for (const [k, v] of Object.entries(changes)) { fields.push(`${k} = ?`); params.push(v); }
+        if (fields.length) {
+          params.push(id);
+          try { await query(`UPDATE tasks SET ${fields.join(', ')} WHERE task_id = ?`, params); } catch {}
+        }
+
+        return { ok: true, task: updated };
+      } catch (error) {
+        log.error('[ToolRouter] Ошибка update_task:', error.message);
+        return { ok: false, error: error.message };
+      }
+    }
+
+    // ---- SET DEADLINE (admin) ----
+    if (name === 'set_deadline') {
+      try {
+        const requester = ctx?.requesterEmployee || null;
+        const requesterRole = (requester && String(requester.user_role || '').toLowerCase()) || 'staff';
+        const isDirector = requesterRole === 'manager' || /директор|стратегическому развитию/i.test(String(requester?.job || ''));
+        if (!isDirector) {
+          return { ok: false, error: 'Недостаточно прав для обновления дедлайна' };
+        }
+
+        const id = Number(A.taskId);
+        if (!Number.isFinite(id) || id <= 0) return { ok: false, error: 'Некорректный ID задачи' };
+
+        let deadline = String(A.deadline || '').trim();
+        if (!deadline) return { ok: false, error: 'Пустой дедлайн' };
+
+        try {
+          const parsed = parseHumanDateRu(deadline, new Date());
+          if (parsed) deadline = toDbDateTime(parsed);
+        } catch {}
+
+        // Обновляем через API и локально
+        const updated = await this.api.update('tasks', String(id), { deadline });
+        try { await query('UPDATE tasks SET deadline = ? WHERE task_id = ?', [deadline, id]); } catch {}
+
+        return { ok: true, task: updated, deadline };
+      } catch (error) {
+        log.error('[ToolRouter] Ошибка set_deadline:', error.message);
         return { ok: false, error: error.message };
       }
     }
