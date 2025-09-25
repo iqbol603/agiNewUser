@@ -25,7 +25,7 @@ async function main() {
       }
     }
     await query('SET FOREIGN_KEY_CHECKS = 1');
-    Отлично! ✅ Уведомление успешно отправлено на ваш chat_id 879574025.
+    Отлично! ✅ Уведомление успешно отправлено на ваш chat_id 879
     console.log('Done.');
     process.exit(0);
   } catch (e) {

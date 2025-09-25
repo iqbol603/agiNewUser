@@ -1,6 +1,7 @@
 import { assertEnv, ENV } from './src/config/env.js';
 import { log } from './src/utils/logger.js';
 import { BotApp } from './src/bot/BotApp.js';
+import { setAppTimezone } from './src/utils/datetime.js';
 import { testConnection, pool, initializeTables } from './src/config/db.js';
 
 let botApp;
@@ -9,6 +10,10 @@ async function start() {
     try {
         assertEnv();
         log.info('[APP] Переменные окружения проверены');
+
+        // Устанавливаем таймзону приложения явно
+        setAppTimezone(process.env.TZ || 'Asia/Dushanbe');
+        log.info(`[APP] Таймзона установлена: ${process.env.TZ}`);
 
         // Инициализируем базу данных
         log.info('[APP] Инициализация базы данных...');

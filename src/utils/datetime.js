@@ -23,9 +23,10 @@ export function parseHumanDateRu(input, now = new Date()) {
 	let base = new Date(now);
 	let dayShift = 0;
 
-	if (/(^|\s)послезавтра(\s|$)/.test(s)) dayShift = 2;
-	else if (/(^|\s)завтра(\s|$)/.test(s)) dayShift = 1;
-	else if (/(^|\s)сегодня(\s|$)/.test(s)) dayShift = 0;
+	// относительные дни: «послезавтра», «завтра», «сегодня», а также формы «на/к завтра»
+	if (/(^|\s)послезавтра(\s|$)/.test(s) || /(\b(?:на|к)\s+послезавтра\b)/.test(s)) dayShift = 2;
+	else if (/(^|\s)завтра(\s|$)/.test(s) || /(\b(?:на|к)\s+завтра\b)/.test(s)) dayShift = 1;
+	else if (/(^|\s)сегодня(\s|$)/.test(s) || /(\b(?:на|к)\s+сегодня\b)/.test(s)) dayShift = 0;
     
     // относительные сдвиги времени: "через X минут/часов/дней"
 	const throughTimeMatch = s.match(/(^|\s)через\s+(\d+)\s*(минут(?:у|ы)?|мин|час(?:а|ов)?|ч|дн(?:я|ей)?|день|дней)(\s|$)/);
@@ -71,8 +72,8 @@ export function parseHumanDateRu(input, now = new Date()) {
 	// dd.mm(.yyyy)
 	const mDate = s.match(/\b(\d{1,2})\.(\d{1,2})(?:\.(\d{2,4}))?\b/);
 
-	// "в 10", "в 10:30", "10:00", "10 часов", "10ч"
-	const mTime = s.match(/\b(?:в\s*)?(\d{1,2})(?::(\d{2}))?\s*(?:час(?:ов|а)?|ч)?\b/);
+	// "в 10", "в 10:30", "10:00", "10 часов", "10ч", также допускаем «к 10:00», «до 10:00»
+	const mTime = s.match(/\b(?:в|к|до)?\s*(\d{1,2})(?::(\d{2}))?\s*(?:час(?:ов|а)?|ч)?\b/);
 
 	const isMorning = /\bутр[ао]?\b/.test(s);
 	const isEvening = /\bвечер[ао]?\b/.test(s) || /\bноч[ьи]\b/.test(s);

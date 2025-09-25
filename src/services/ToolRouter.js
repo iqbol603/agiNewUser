@@ -15,10 +15,27 @@ function isDirectorOrAssistant(employee) {
   const job = String(employee.job || employee.position || '').toLowerCase();
   const name = String(employee.name || '').toLowerCase();
   const userRole = String(employee.user_role || '').toLowerCase();
-  if (/директор|руководитель|начальник|заместитель|помощник|помощница/.test(job)) return true;
+  
+  // Исключаем только настоящих директоров и помощниц
+  if (/директор/.test(job) && !/отдела маркетинга/.test(job)) return true;
+  if (/помощник|помощница/.test(job)) return true;
   if (name.includes('муминов') || name.includes('бахтиёр') || name.includes('химматова') || name.includes('нигора') || name.includes('боймирзоева') || name.includes('нозима')) return true;
   if (userRole === 'manager' && /помощник|помощница/.test(job)) return true;
+  
   return false;
+}
+
+function isMarketingEmployee(employee) {
+  if (!employee) return false;
+  const job = String(employee.job || employee.position || '').toLowerCase();
+  
+  // Сначала проверяем, что это сотрудник маркетинга
+  if (!/маркет/.test(job)) return false;
+  
+  // Исключаем директоров и помощниц (даже если у них "маркетинг" в должности)
+  if (isDirectorOrAssistant(employee)) return false;
+  
+  return true;
 }
 
 const mapTaskRow = (t, employeesById = new Map(), assignersByTaskId = new Map()) => {
@@ -111,6 +128,14 @@ export const TOOL_SCHEMAS = [
     function: {
       name: 'list_employees',
       description: 'Вернуть список сотрудников',
+      parameters: { type: 'object', properties: {} }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'list_marketing_employees',
+      description: 'Получить список сотрудников отдела маркетинга (исключая директоров и помощниц)',
       parameters: { type: 'object', properties: {} }
     }
   },
@@ -358,6 +383,10 @@ export class ToolRouter {
         // Блокируем назначение задач директору и помощницам
         if (assignee && isDirectorOrAssistant(assignee)) {
           return { ok: false, error: 'Назначение задач директору и его помощникам запрещено' };
+        }
+        // Дополнительно: назначаем только сотрудникам маркетинга (исключая директоров и помощниц)
+        if (assignee && !isMarketingEmployee(assignee)) {
+          return { ok: false, error: 'Назначение запрещено: исполнитель не является сотрудником отдела маркетинга' };
         }
 
         let deadline = String(A.deadline || '').trim();
@@ -663,6 +692,13 @@ export class ToolRouter {
     if (name === 'list_employees') {
       const emps = await this.employees.list();
       return { ok: true, employees: emps };
+    }
+
+    // ---- LIST MARKETING EMPLOYEES ----
+    if (name === 'list_marketing_employees') {
+      const allEmps = await this.employees.list();
+      const marketingEmps = allEmps.filter(emp => isMarketingEmployee(emp));
+      return { ok: true, employees: marketingEmps };
     }
 
     // ---- LIST TASKS ----
@@ -1141,6 +1177,9 @@ export class ToolRouter {
           if (!newEmployeeId && A.assigneeName) {
             const { match } = await this.employees.resolveByName(A.assigneeName);
             newEmployeeId = match?.employee_id || match?.id || null;
+            if (match && !isMarketingEmployee(match)) {
+              return { ok: false, error: 'Переназначение запрещено: исполнитель не является сотрудником отдела маркетинга' };
+            }
           }
           if (newEmployeeId) changes.employee_id = newEmployeeId;
         }
