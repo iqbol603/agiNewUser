@@ -148,6 +148,15 @@ import { startDirectorHourlyReportScheduler,startAssigneeReminderScheduler5min }
 import { startExplanationTimeoutService } from '../services/ExplanationTimeoutService.js';
 import { startTaskStatusUpdater } from '../services/TaskStatusUpdater.js';
 import { startBonusPenaltyService } from '../services/BonusPenaltyService.js';
+import { query } from '../config/db.js';
+
+// helper: "879574025" -> 879574025 (если число), иначе строка
+function toNumericIfPossible(v) {
+  if (v === null || v === undefined) return v;
+  const s = String(v).trim();
+  if (/^-?\d+$/.test(s)) return Number(s);
+  return s;
+}
 
 // Нормализация статуса к БД
 function normalizeTaskStatus(s) {
@@ -226,6 +235,9 @@ export class BotApp {
               ],
               [
                 { text: '📝 Объяснительные', callback_data: 'leadership_explanations' },
+                { text: '🚫 Лишение бонусов', callback_data: 'leadership_penalty_candidates' }
+              ],
+              [
                 { text: '📋 Все задачи', callback_data: 'leadership_all_tasks' }
               ],
               [
@@ -525,14 +537,22 @@ export class BotApp {
           `Дата: ${new Date().toLocaleString('ru-RU')}`
         );
 
-        // Уведомляем сотрудника
-        if (employee.chat_id) {
-          await this.bot.sendMessage(employee.chat_id,
-            `💰 УВЕДОМЛЕНИЕ О ЛИШЕНИИ БОНУСА\n\n` +
-            `Вам лишен бонус в размере ${bonusAmount} сом\n` +
-            `Причина: ${comment}\n` +
-            `Дата: ${new Date().toLocaleString('ru-RU')}`
-          );
+        // Уведомляем сотрудника (если есть chat_id и чат доступен)
+        try {
+          if (employee.chat_id) {
+            await this.bot.sendMessage(
+              toNumericIfPossible(employee.chat_id),
+              `💰 УВЕДОМЛЕНИЕ О ЛИШЕНИИ БОНУСА\n\n` +
+              `Вам лишен бонус в размере ${bonusAmount} сом\n` +
+              `Причина: ${comment}\n` +
+              `Дата: ${new Date().toLocaleString('ru-RU')}`
+            );
+          } else {
+            await this.bot.sendMessage(msg.chat.id, '⚠️ У сотрудника не указан chat_id — личное уведомление не отправлено.');
+          }
+        } catch (notifyErr) {
+          log.error('[BotApp] Ошибка лишения бонуса:', notifyErr?.message || notifyErr);
+          await this.bot.sendMessage(msg.chat.id, '⚠️ Не удалось отправить уведомление сотруднику (возможно, чат не найден).');
         }
 
         // Уведомляем всех сотрудников о лишении бонуса
@@ -1014,6 +1034,232 @@ export class BotApp {
           return;
         }
 
+        // Обработка запроса отчёта по объяснительным: leadership_explanations_report|<months>
+        if (data.startsWith('leadership_explanations_report|')) {
+          const parts = data.split('|');
+          const months = Math.max(1, parseInt(parts[1] || '1', 10) || 1);
+          try {
+            // Вычисляем начало периода по requested_at
+            const now = new Date();
+            const start = new Date(now.getFullYear(), now.getMonth() - (months - 1), 1, 0, 0, 0);
+
+            const rows = await query(`
+              SELECT 
+                e.employee_id,
+                e.name AS employee_name,
+                e.job AS employee_job,
+                COUNT(ee.id) AS requested,
+                SUM(CASE WHEN ee.responded_at IS NOT NULL THEN 1 ELSE 0 END) AS provided
+              FROM employees e
+              LEFT JOIN employee_explanations ee 
+                ON ee.employee_id = e.employee_id 
+               AND ee.requested_at >= ?
+              GROUP BY e.employee_id, e.name, e.job
+            `, [start]);
+
+            // Формируем краткий отчёт (сортировка по не написано)
+            const enriched = rows.map(r => ({
+              employee_id: r.employee_id,
+              name: r.employee_name || '—',
+              job: r.employee_job || '—',
+              requested: Number(r.requested || 0),
+              provided: Number(r.provided || 0),
+              missing: Math.max(0, Number(r.requested || 0) - Number(r.provided || 0))
+            })).sort((a, b) => b.missing - a.missing || b.requested - a.requested || a.name.localeCompare(b.name));
+
+            const header = `📝 Отчет по объяснительным (за ${months === 1 ? 'текущий месяц' : months + ' мес.'})`;
+            let text = `${header}\n\n`;
+            const top = enriched.slice(0, 15);
+            if (top.length === 0) {
+              text += 'Нет данных за выбранный период.';
+            } else {
+              for (const r of top) {
+                text += `• ${r.name}: запрошено=${r.requested}, написано=${r.provided}, не написано=${r.missing}\n`;
+              }
+              if (enriched.length > top.length) {
+                text += `\n… и еще ${enriched.length - top.length} сотрудников`;
+              }
+            }
+
+            // Кнопки для смены периода
+            const keyboard = {
+              inline_keyboard: [
+                [
+                  { text: '1 мес', callback_data: 'leadership_explanations_report|1' },
+                  { text: '3 мес', callback_data: 'leadership_explanations_report|3' },
+                  { text: '6 мес', callback_data: 'leadership_explanations_report|6' }
+                ],
+                [ { text: '🔙 Назад', callback_data: 'leadership_refresh' } ]
+              ]
+            };
+
+            // Обновляем сообщение, если возможно, иначе отправляем новое
+            try {
+              await this.bot.editMessageText(text, {
+                chat_id: q.message.chat.id,
+                message_id: q.message.message_id,
+                reply_markup: keyboard
+              });
+            } catch {
+              await this.bot.sendMessage(q.message.chat.id, text, { reply_markup: keyboard });
+            }
+
+            await this.bot.answerCallbackQuery(q.id, { text: 'Отчёт обновлён' });
+          } catch (e) {
+            log.error('[LEADERSHIP_EXPLANATIONS_REPORT]', e?.message || e);
+            await this.bot.answerCallbackQuery(q.id, { text: 'Ошибка формирования отчёта' });
+          }
+          return;
+        }
+
+        // Кандидаты на лишение бонусов
+        if (data === 'leadership_penalty_candidates') {
+          try {
+            const days = 30;
+            const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+            const rows = await query(`
+              SELECT 
+                e.employee_id,
+                e.name AS employee_name,
+                e.job AS employee_job,
+                COUNT(ee.id) AS explanation_count
+              FROM employees e
+              LEFT JOIN employee_explanations ee 
+                ON ee.employee_id = e.employee_id 
+               AND ee.requested_at >= ?
+              GROUP BY e.employee_id, e.name, e.job
+              HAVING explanation_count >= 3
+              ORDER BY explanation_count DESC, e.name ASC
+            `, [since]);
+
+            if (!rows || rows.length === 0) {
+              await this.bot.sendMessage(q.message.chat.id, '✅ Кандидатов на лишение бонусов за последние 30 дней не найдено.');
+            } else {
+              let text = '🚫 Кандидаты на лишение бонусов (за 30 дней, ≥3 объяснительных):\n\n';
+              const keyboard = { inline_keyboard: [] };
+              for (const r of rows.slice(0, 10)) {
+                text += `• ${r.employee_name} (${r.employee_job || '—'}) — объяснительных: ${r.explanation_count}\n`;
+                keyboard.inline_keyboard.push([
+                  { text: `Лишить (${r.employee_name})`, callback_data: `leadership_penalty_prompt|${r.employee_id}` },
+                  { text: 'Помиловать', callback_data: `leadership_penalty_pardon|${r.employee_id}` },
+                  { text: 'Дать шанс', callback_data: `leadership_penalty_warn|${r.employee_id}` }
+                ]);
+              }
+              if (rows.length > 10) {
+                text += `\n… и еще ${rows.length - 10} кандидатов`;
+              }
+              keyboard.inline_keyboard.push([{ text: '🔙 Назад', callback_data: 'leadership_refresh' }]);
+              await this.bot.sendMessage(q.message.chat.id, text, { reply_markup: keyboard });
+            }
+            await this.bot.answerCallbackQuery(q.id, { text: 'Список кандидатов' });
+          } catch (e) {
+            log.error('[LEADERSHIP_PENALTY_CANDIDATES]', e?.message || e);
+            await this.bot.answerCallbackQuery(q.id, { text: 'Ошибка формирования списка' });
+          }
+          return;
+        }
+
+        // Действия по кандидату: лишить/помиловать/дать шанс
+        if (data.startsWith('leadership_penalty_prompt|')) {
+          const empId = Number(data.split('|')[1]);
+          // Быстрый выбор сумм
+          const kb = {
+            inline_keyboard: [
+              [
+                { text: '500', callback_data: `leadership_penalty_apply|${empId}|500` },
+                { text: '1000', callback_data: `leadership_penalty_apply|${empId}|1000` },
+                { text: '1500', callback_data: `leadership_penalty_apply|${empId}|1500` }
+              ],
+              [ { text: 'Отмена', callback_data: 'leadership_refresh' } ]
+            ]
+          };
+          await this.bot.sendMessage(q.message.chat.id, `Выберите сумму лишения бонуса для сотрудника ID ${empId}:`, { reply_markup: kb });
+          await this.bot.answerCallbackQuery(q.id, { text: 'Выбор суммы' });
+          return;
+        }
+
+        // Применение лишения бонуса по кнопке (без команды)
+        if (data.startsWith('leadership_penalty_apply|')) {
+          const [, empIdStr, amountStr] = data.split('|');
+          const employeeId = Number(empIdStr);
+          const bonusAmount = Number(amountStr);
+          const comment = 'Решение директора через панель';
+          try {
+            const employees = await this.api.get('employees');
+            const employee = employees.find(emp => emp.employee_id === employeeId);
+
+            if (!employee) {
+              await this.bot.answerCallbackQuery(q.id, { text: 'Сотрудник не найден', show_alert: true });
+              return;
+            }
+
+            log.info(`[BotApp] Лишение бонуса (кнопка): ${employee.name}, сумма: ${bonusAmount}, причина: ${comment}`);
+
+            await this.bot.sendMessage(q.message.chat.id,
+              `💰 БОНУС ЛИШЕН\n\n` +
+              `Сотрудник: ${employee.name}\n` +
+              `Сумма: ${bonusAmount} сом\n` +
+              `Причина: ${comment}\n` +
+              `Дата: ${new Date().toLocaleString('ru-RU')}`
+            );
+
+            try {
+              if (employee.chat_id) {
+                await this.bot.sendMessage(
+                  toNumericIfPossible(employee.chat_id),
+                  `💰 УВЕДОМЛЕНИЕ О ЛИШЕНИИ БОНУСА\n\n` +
+                  `Вам лишен бонус в размере ${bonusAmount} сом\n` +
+                  `Причина: ${comment}\n` +
+                  `Дата: ${new Date().toLocaleString('ru-RU')}`
+                );
+              } else {
+                await this.bot.sendMessage(q.message.chat.id, '⚠️ У сотрудника не указан chat_id — личное уведомление не отправлено.');
+              }
+            } catch (notifyErr) {
+              log.warn(`[BotApp] Не удалось уведомить сотрудника ${employee.name}:`, notifyErr?.message || notifyErr);
+              await this.bot.sendMessage(q.message.chat.id, '⚠️ Не удалось отправить уведомление сотруднику (возможно, чат не найден).');
+            }
+
+            await this.bot.answerCallbackQuery(q.id, { text: 'Готово' });
+          } catch (e) {
+            log.error('[BotApp] Ошибка лишения бонуса (кнопка):', e?.message || e);
+            await this.bot.answerCallbackQuery(q.id, { text: 'Ошибка применения', show_alert: true });
+          }
+          return;
+        }
+        if (data.startsWith('leadership_penalty_pardon|')) {
+      const empId = Number(data.split('|')[1]);
+      await this.bot.sendMessage(q.message.chat.id, `✅ Помилование: сотрудник ID ${empId}.`);
+      try {
+        const employees = await this.api.get('employees');
+        const employee = employees.find(emp => emp.employee_id === empId);
+        if (employee?.chat_id) {
+          await this.bot.sendMessage(
+            toNumericIfPossible(employee.chat_id),
+            '✅ По решению директора лишение бонуса не применяется. Продолжайте работу.'
+          );
+        }
+      } catch {}
+          await this.bot.answerCallbackQuery(q.id, { text: 'Помилован' });
+          return;
+        }
+        if (data.startsWith('leadership_penalty_warn|')) {
+      const empId = Number(data.split('|')[1]);
+      await this.bot.sendMessage(q.message.chat.id, `⚠️ Дать шанс: сотрудник ID ${empId}. Контроль в следующем месяце.`);
+      try {
+        const employees = await this.api.get('employees');
+        const employee = employees.find(emp => emp.employee_id === empId);
+        if (employee?.chat_id) {
+          await this.bot.sendMessage(
+            toNumericIfPossible(employee.chat_id),
+            '⚠️ Директор дал шанс исправиться. Пожалуйста, улучшите показатели. Контроль — в следующем месяце.'
+          );
+        }
+      } catch {}
+          await this.bot.answerCallbackQuery(q.id, { text: 'Шанс дан' });
+          return;
+        }
+
         try {
           const { DecisionEngine } = await import('../services/DecisionEngine.js');
           const { LeadershipCommands } = await import('../services/LeadershipCommands.js');
@@ -1037,30 +1283,23 @@ export class BotApp {
               result = await leadership.autoDecideOnTasks();
               break;
             case 'leadership_explanations':
-            case 'explanations':
-              const expResult = await this.tools.route('list_pending_explanations', { limit: 10 }, {
-                requesterChatId: String(q.from.id),
-                requesterEmployee: auth.employee
-              });
-              if (expResult.ok && expResult.explanations.length > 0) {
-                result = '📝 ОЖИДАЮЩИЕ РАССМОТРЕНИЯ ОБЪЯСНИТЕЛЬНЫЕ:\n\n';
-                for (const exp of expResult.explanations) {
-                  result += `🆔 ID: ${exp.id}\n`;
-                  result += `📋 Задача: ${exp.task}\n`;
-                  result += `👤 Сотрудник: ${exp.employee_name}\n`;
-                  result += `📝 Объяснение: ${exp.explanation_text}\n`;
-                  result += `📅 Дата: ${new Date(exp.responded_at).toLocaleString('ru-RU')}\n`;
-                  result += `⏰ Статус: Ожидает рассмотрения\n`;
-                  result += `\n${'─'.repeat(40)}\n\n`;
-                }
-                result += `\n💡 Используйте команды для рассмотрения:\n`;
-                result += `/accept [ID] [комментарий] - принять\n`;
-                result += `/reject [ID] [комментарий] - отклонить\n`;
-                result += `/penalty [ID] [сумма] [комментарий] - штраф`;
-              } else {
-                result = '✅ Нет ожидающих объяснительных';
-              }
+            case 'explanations': {
+              // Меню отчётов по объяснительным для директора
+              const text = '📝 Объяснительные — выберите период отчёта:';
+              const keyboard = {
+                inline_keyboard: [
+                  [
+                    { text: '1 мес', callback_data: 'leadership_explanations_report|1' },
+                    { text: '3 мес', callback_data: 'leadership_explanations_report|3' },
+                    { text: '6 мес', callback_data: 'leadership_explanations_report|6' }
+                  ],
+                  [ { text: '🔙 Назад', callback_data: 'leadership_refresh' } ]
+                ]
+              };
+              await this.bot.sendMessage(q.message.chat.id, text, { reply_markup: keyboard });
+              result = '';
               break;
+            }
             case 'leadership_all_tasks':
               const tasksResult = await this.tools.route('list_tasks', {}, {
                 requesterChatId: String(q.from.id),
@@ -1093,6 +1332,9 @@ export class BotApp {
                     ],
                     [
                       { text: '📝 Объяснительные', callback_data: 'leadership_explanations' },
+                      { text: '🚫 Лишение бонусов', callback_data: 'leadership_penalty_candidates' }
+                    ],
+                    [
                       { text: '📋 Все задачи', callback_data: 'leadership_all_tasks' }
                     ],
                     [

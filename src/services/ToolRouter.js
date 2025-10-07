@@ -645,17 +645,44 @@ export class ToolRouter {
           log.info(`[ToolRouter] Задача ${id} готова к закрытию: DoD завершен, отчет предоставлен`);
         }
         
-        // 1. Обновляем на внешнем API
+        // 1. Получаем текущий статус для истории
+        let oldStatus = null;
+        try {
+          const [currentTask] = await query('SELECT status FROM tasks WHERE task_id = ?', [id]);
+          oldStatus = currentTask?.status || null;
+        } catch (error) {
+          log.warn('[ToolRouter] Не удалось получить текущий статус задачи:', error.message);
+        }
+        
+        // 2. Обновляем на внешнем API
         const res = await this.api.update('tasks', id, { status: newStatus });
         
-        // 2. Синхронизируем с локальной БД
+        // 3. Синхронизируем с локальной БД
         try {
           await query('UPDATE tasks SET status = ? WHERE task_id = ?', [newStatus, id]);
         } catch (dbError) {
           log.error('[ToolRouter] Ошибка синхронизации статуса с локальной БД:', dbError.message);
         }
         
-        // 2.1 Уведомляем назначившего (директора/руководителя), если он есть в task_assigners
+        // 4. Записываем изменение статуса в историю
+        try {
+          await query(`
+            INSERT INTO task_status_history 
+            (task_id, old_status, new_status, changed_by, change_reason)
+            VALUES (?, ?, ?, ?, ?)
+          `, [
+            id, 
+            oldStatus, 
+            newStatus, 
+            requester?.employee_id || requester?.id || null,
+            `Изменение статуса через ${requester?.name || 'систему'}`
+          ]);
+          log.info(`[ToolRouter] Записано изменение статуса задачи ${id}: ${oldStatus} → ${newStatus}`);
+        } catch (historyError) {
+          log.error('[ToolRouter] Ошибка записи истории изменения статуса:', historyError.message);
+        }
+        
+        // 5. Уведомляем назначившего (директора/руководителя), если он есть в task_assigners
         try {
           const [rows] = await query('SELECT ta.assigner_employee_id, e.chat_id, e.name FROM task_assigners ta LEFT JOIN employees e ON e.employee_id = ta.assigner_employee_id WHERE ta.task_id = ?', [id]);
           const assigner = Array.isArray(rows) ? rows[0] : rows;
@@ -669,7 +696,7 @@ export class ToolRouter {
           log.warn('[ToolRouter] Не удалось уведомить назначившего о смене статуса:', notifyErr.message);
         }
 
-        // 3. Если задача закрывается - создаем финальный отчет
+        // 6. Если задача закрывается - создаем финальный отчет
         if (isClosing) {
           try {
             const { ReportService } = await import('./ReportService.js');
